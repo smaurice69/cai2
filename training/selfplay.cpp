@@ -365,6 +365,7 @@ void SelfPlayOrchestrator::log_result(int game_index, const SelfPlayResult& resu
     results_stream_ << "\"duration_ms\":" << std::fixed << std::setprecision(2) << result.duration_ms << ',';
     results_stream_ << "\"start_fen\":\"" << escape_json(result.start_fen) << '"' << ',';
     results_stream_ << "\"end_fen\":\"" << escape_json(result.end_fen) << '"' << ',';
+
     results_stream_ << "\"moves\":" << join_string_array(result.moves_san);
     if (config_.record_fens) {
         results_stream_ << ",\"fens\":" << join_string_array(result.fens);
