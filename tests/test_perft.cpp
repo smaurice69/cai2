@@ -11,6 +11,8 @@ TEST(PerftTest, StartPositionDepths) {
     EXPECT_EQ(perft(board, 2), 400ULL);
     EXPECT_EQ(perft(board, 3), 8902ULL);
     EXPECT_EQ(perft(board, 4), 197281ULL);
+    EXPECT_EQ(perft(board, 5), 4865609ULL);
+    EXPECT_EQ(perft(board, 6), 119060324ULL);
 }
 
 TEST(PerftTest, KiwipeteDepths) {
@@ -20,6 +22,7 @@ TEST(PerftTest, KiwipeteDepths) {
     EXPECT_EQ(perft(board, 1), 29ULL);
     EXPECT_EQ(perft(board, 2), 956ULL);
     EXPECT_EQ(perft(board, 3), 28900ULL);
+    EXPECT_EQ(perft(board, 4), 951029ULL);
 }
 
 }  // namespace chiron

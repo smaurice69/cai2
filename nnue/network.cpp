@@ -91,11 +91,64 @@ void Network::load_default() {
     loaded_ = true;
 }
 
+void Network::save_to_file(const std::string& path) const {
+    DiskHeader header{};
+    std::memcpy(header.magic, kMagic, sizeof(kMagic));
+    header.version = kSupportedVersion;
+    header.feature_count = static_cast<std::uint32_t>(kFeatureCount);
+    header.bias = bias_;
+    header.scale = scale_;
+
+    std::vector<int16_t> buffer(kFeatureCount);
+    for (std::size_t i = 0; i < kFeatureCount; ++i) {
+        int32_t value = weights_[i];
+        value = std::clamp(value, static_cast<int32_t>(-32768), static_cast<int32_t>(32767));
+        buffer[i] = static_cast<int16_t>(value);
+    }
+
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+        throw std::runtime_error("Failed to open NNUE network for writing: " + path);
+    }
+    stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    stream.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size() * sizeof(int16_t)));
+    if (!stream) {
+        throw std::runtime_error("Failed to write NNUE network file: " + path);
+    }
+}
+
 int32_t Network::weight(Color color, PieceType piece, int square) const {
     if (piece == PieceType::None || square < 0 || square >= kBoardSize) {
         return 0;
     }
     return weights_[feature_index(color, piece, square)];
+}
+
+void Network::set_weight(Color color, PieceType piece, int square, int32_t value) {
+    if (piece == PieceType::None || square < 0 || square >= kBoardSize) {
+        return;
+    }
+    weights_[feature_index(color, piece, square)] = value;
+    loaded_ = true;
+}
+
+void Network::add_weight(Color color, PieceType piece, int square, int32_t delta) {
+    if (piece == PieceType::None || square < 0 || square >= kBoardSize) {
+        return;
+    }
+    std::size_t idx = feature_index(color, piece, square);
+    weights_[idx] += delta;
+    loaded_ = true;
+}
+
+void Network::set_bias(int32_t bias) {
+    bias_ = bias;
+    loaded_ = true;
+}
+
+void Network::set_scale(float scale) {
+    scale_ = scale;
+    loaded_ = true;
 }
 
 }  // namespace chiron::nnue

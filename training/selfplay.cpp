@@ -5,11 +5,13 @@
 #include <ctime>
 #include <iomanip>
 #include <ios>
+#include <filesystem>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
 
 #include "bitboard.h"
+#include "evaluation.h"
 #include "movegen.h"
 
 namespace chiron {
@@ -217,9 +219,29 @@ std::shared_ptr<nnue::Evaluator> create_evaluator(const EngineConfig& config) {
 
 SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
     : config_(std::move(config)),
-      rng_(config_.seed != 0U ? config_.seed : static_cast<unsigned int>(std::random_device{}())) {}
+      rng_(config_.seed != 0U ? config_.seed : static_cast<unsigned int>(std::random_device{}())),
+      trainer_(Trainer::Config{config_.training_learning_rate, 0.0005}) {
+    if (config_.enable_training) {
+        config_.record_fens = true;
+        if (!config_.training_output_path.empty() && std::filesystem::exists(config_.training_output_path)) {
+            parameters_.load(config_.training_output_path);
+            set_global_network_path(config_.training_output_path);
+        }
+        training_buffer_.reserve(config_.training_batch_size);
+        if (config_.white.network_path.empty() && !config_.training_output_path.empty()) {
+            config_.white.network_path = config_.training_output_path;
+        }
+        if (config_.black.network_path.empty() && !config_.training_output_path.empty()) {
+            config_.black.network_path = config_.training_output_path;
+        }
+    }
+}
 
 void SelfPlayOrchestrator::ensure_streams() {
+    if (streams_open_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(log_mutex_);
     if (streams_open_) {
         return;
     }
@@ -236,13 +258,29 @@ void SelfPlayOrchestrator::ensure_streams() {
 
 void SelfPlayOrchestrator::run() {
     ensure_streams();
-    for (int game = 0; game < config_.games; ++game) {
-        EngineConfig white = config_.white;
-        EngineConfig black = config_.black;
-        if (config_.alternate_colors && (game % 2 == 1)) {
-            std::swap(white, black);
-        }
-        play_game(game, white, black, true);
+    int total_games = config_.games;
+    int concurrency = std::max(1, config_.concurrency);
+    std::atomic<int> next_game{0};
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<std::size_t>(concurrency));
+    for (int thread_index = 0; thread_index < concurrency; ++thread_index) {
+        workers.emplace_back([this, total_games, &next_game]() {
+            while (true) {
+                int game = next_game.fetch_add(1);
+                if (game >= total_games) {
+                    break;
+                }
+                EngineConfig white = config_.white;
+                EngineConfig black = config_.black;
+                if (config_.alternate_colors && (game % 2 == 1)) {
+                    std::swap(white, black);
+                }
+                play_game(game, white, black, true);
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
     }
 }
 
@@ -258,6 +296,7 @@ SelfPlayResult SelfPlayOrchestrator::play_game(int game_index, const EngineConfi
             write_pgn(game_index, result);
         }
     }
+    handle_training(result);
     return result;
 }
 
@@ -276,6 +315,8 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int /*game_index*/, const 
 
     Search white_search(white.table_size, white_eval);
     Search black_search(black.table_size, black_eval);
+    white_search.set_threads(white.threads);
+    black_search.set_threads(black.threads);
     white_search.clear();
     black_search.clear();
 
@@ -297,7 +338,10 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int /*game_index*/, const 
         const EngineConfig& cfg = board.side_to_move() == Color::White ? white : black;
         Search& current_search = board.side_to_move() == Color::White ? white_search : black_search;
 
-        Move best = current_search.search_best_move(board, cfg.max_depth);
+        SearchLimits limits;
+        limits.max_depth = cfg.max_depth;
+        SearchResult search_result = current_search.search(board, limits);
+        Move best = search_result.best_move;
         if (is_null_move(best)) {
             bool in_check = board.in_check(board.side_to_move());
             if (in_check) {
@@ -355,6 +399,7 @@ void SelfPlayOrchestrator::log_result(int game_index, const SelfPlayResult& resu
     if (!results_stream_) {
         return;
     }
+    std::lock_guard<std::mutex> lock(log_mutex_);
     results_stream_ << '{';
     results_stream_ << "\"game\":" << (game_index + 1) << ',';
     results_stream_ << "\"white\":\"" << escape_json(result.white_player) << '"' << ',';
@@ -378,6 +423,7 @@ void SelfPlayOrchestrator::write_pgn(int game_index, const SelfPlayResult& resul
     if (!pgn_stream_) {
         return;
     }
+    std::lock_guard<std::mutex> lock(log_mutex_);
     auto now = std::chrono::system_clock::now();
     std::time_t now_time = std::chrono::system_clock::to_time_t(now);
     std::tm tm = *std::localtime(&now_time);
@@ -400,6 +446,36 @@ void SelfPlayOrchestrator::write_pgn(int game_index, const SelfPlayResult& resul
     }
     pgn_stream_ << result.result << "\n\n";
     pgn_stream_.flush();
+}
+
+void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
+    if (!config_.enable_training) {
+        return;
+    }
+
+    int target = 0;
+    if (result.result == "1-0") {
+        target = 1000;
+    } else if (result.result == "0-1") {
+        target = -1000;
+    }
+
+    std::lock_guard<std::mutex> lock(training_mutex_);
+    training_buffer_.push_back({result.start_fen, target});
+    for (const std::string& fen : result.fens) {
+        training_buffer_.push_back({fen, target});
+    }
+
+    if (training_buffer_.size() >= config_.training_batch_size) {
+        trainer_.train_batch(training_buffer_, parameters_);
+        training_buffer_.clear();
+        if (!config_.training_output_path.empty()) {
+            parameters_.save(config_.training_output_path);
+            set_global_network_path(config_.training_output_path);
+            config_.white.network_path = config_.training_output_path;
+            config_.black.network_path = config_.training_output_path;
+        }
+    }
 }
 
 }  // namespace chiron

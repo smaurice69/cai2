@@ -172,7 +172,7 @@ void Board::set_from_fen(const std::string& fen) {
 bool Board::is_square_attacked(Square sq, Color by) const {
     int square = static_cast<int>(sq);
     Bitboard pawns = pieces(by, PieceType::Pawn);
-    if (pawn_attacks(by, square) & pawns) {
+    if (pawn_attacks(opposite_color(by), square) & pawns) {
         return true;
     }
     Bitboard knights = pieces(by, PieceType::Knight);
@@ -361,6 +361,39 @@ void Board::undo_move(const Move& move, const State& state) {
         }
     }
 
+    castling_rights_ = state.castling_rights;
+    en_passant_square_ = state.en_passant_square;
+    halfmove_clock_ = state.halfmove_clock;
+    zobrist_key_ = state.zobrist_key;
+    fullmove_number_ = state.fullmove_number;
+}
+
+void Board::make_null_move(State& out_state) {
+    out_state.castling_rights = castling_rights_;
+    out_state.en_passant_square = en_passant_square_;
+    out_state.halfmove_clock = halfmove_clock_;
+    out_state.zobrist_key = zobrist_key_;
+    out_state.captured_piece = PieceType::None;
+    out_state.fullmove_number = fullmove_number_;
+
+    if (en_passant_square_ != -1) {
+        zobrist_key_ ^= Zobrist::en_passant_key(file_of(static_cast<Square>(en_passant_square_)));
+    }
+    en_passant_square_ = -1;
+
+    Color us = side_to_move_;
+    side_to_move_ = opposite_color(us);
+    zobrist_key_ ^= Zobrist::side_key();
+
+    if (us == Color::Black) {
+        ++fullmove_number_;
+    }
+
+    ++halfmove_clock_;
+}
+
+void Board::undo_null_move(const State& state) {
+    side_to_move_ = opposite_color(side_to_move_);
     castling_rights_ = state.castling_rights;
     en_passant_square_ = state.en_passant_square;
     halfmove_clock_ = state.halfmove_clock;
