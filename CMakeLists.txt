@@ -16,11 +16,15 @@ add_library(chiron_lib
     src/search.cpp
     src/uci.cpp
     src/zobrist.cpp
+    src/notation.cpp
     eval/evaluation.cpp
     nnue/network.cpp
     nnue/evaluator.cpp
     training/selfplay.cpp
+    training/trainer.cpp
+    training/pgn_importer.cpp
     tools/tuning.cpp
+    tools/teacher.cpp
 )
 
 target_include_directories(chiron_lib
@@ -55,6 +59,7 @@ add_executable(chiron_tests
     tests/test_perft.cpp
     tests/test_nnue.cpp
     tests/test_selfplay.cpp
+    tests/test_training.cpp
 )
 target_link_libraries(chiron_tests PRIVATE chiron_lib GTest::gtest_main)
 

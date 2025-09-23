@@ -1,8 +1,10 @@
 #pragma once
 
 #include <fstream>
+#include <memory>
 #include <string>
 
+#include "tools/time_manager.h"
 #include "training/selfplay.h"
 
 namespace chiron {
@@ -29,6 +31,7 @@ struct SprtSummary {
 class SprtTester {
    public:
     SprtTester(SelfPlayConfig base_config, EngineConfig baseline, EngineConfig candidate, SprtConfig sprt_config);
+    ~SprtTester();
 
     SprtSummary run();
 
@@ -40,7 +43,7 @@ class SprtTester {
     EngineConfig baseline_;
     EngineConfig candidate_;
     SprtConfig sprt_;
-    SelfPlayOrchestrator orchestrator_;
+    std::unique_ptr<SelfPlayOrchestrator> orchestrator_;
 
     double llr_ = 0.0;
     int games_played_ = 0;
@@ -51,30 +54,6 @@ class SprtTester {
     double win_prob_h1_ = 0.0;
     double loss_prob_h0_ = 0.0;
     double loss_prob_h1_ = 0.0;
-};
-
-struct TimeHeuristicConfig {
-    double base_allocation = 0.04;  // Fraction of remaining time to invest each move.
-    double increment_bonus = 0.5;   // Additional fraction of increment to invest.
-    int min_time_ms = 10;
-    int max_time_ms = 2000;
-};
-
-struct TimeTuningReport {
-    int games_evaluated = 0;
-    double average_ply = 0.0;
-    double recommended_moves_to_go = 40.0;
-};
-
-class TimeManager {
-   public:
-    explicit TimeManager(TimeHeuristicConfig config = {});
-
-    int allocate_time_ms(int remaining_ms, int increment_ms, int move_number, int moves_to_go) const;
-    TimeTuningReport analyse_results_log(const std::string& path) const;
-
-   private:
-    TimeHeuristicConfig config_;
 };
 
 }  // namespace chiron

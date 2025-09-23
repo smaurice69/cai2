@@ -2,16 +2,34 @@
 
 #include <algorithm>
 #include <exception>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "evaluation.h"
+#include "perft.h"
+#include "tools/teacher.h"
 #include "tools/tuning.h"
+#include "training/pgn_importer.h"
 #include "training/selfplay.h"
+#include "training/trainer.h"
 
 namespace {
+
+using chiron::Board;
+using chiron::ParameterSet;
+using chiron::PgnImporter;
+using chiron::TeacherEngine;
+using chiron::Trainer;
+using chiron::TrainingExample;
+using chiron::load_training_file;
+using chiron::perft;
+using chiron::save_training_file;
 
 int parse_int(const std::vector<std::string>& args, std::size_t& index, const std::string& option) {
     if (index + 1 >= args.size()) {
@@ -44,6 +62,27 @@ std::size_t parse_size(const std::vector<std::string>& args, std::size_t& index,
     } catch (const std::exception&) {
         throw std::invalid_argument("Invalid size for " + option);
     }
+}
+
+int run_perft(const std::vector<std::string>& args) {
+    Board board;
+    board.set_start_position();
+    int depth = 1;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& opt = args[i];
+        if (opt == "--depth") {
+            depth = parse_int(args, i, opt);
+        } else if (opt == "--fen") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--fen requires a value");
+            board.set_from_fen(args[++i]);
+        }
+    }
+    if (depth <= 0) {
+        throw std::invalid_argument("perft depth must be positive");
+    }
+    std::uint64_t nodes = perft(board, depth);
+    std::cout << "Perft(" << depth << ") = " << nodes << std::endl;
+    return 0;
 }
 
 int run_selfplay(const std::vector<std::string>& args) {
@@ -104,10 +143,31 @@ int run_selfplay(const std::vector<std::string>& args) {
         } else if (opt == "--black-network") {
             if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
             config.black.network_path = args[++i];
+        } else if (opt == "--threads") {
+            int threads = parse_int(args, i, opt);
+            config.white.threads = threads;
+            config.black.threads = threads;
+        } else if (opt == "--white-threads") {
+            config.white.threads = parse_int(args, i, opt);
+        } else if (opt == "--black-threads") {
+            config.black.threads = parse_int(args, i, opt);
         } else if (opt == "--fixed-colors") {
             config.alternate_colors = false;
         } else if (opt == "--alternate-colors") {
             config.alternate_colors = true;
+        } else if (opt == "--concurrency") {
+            config.concurrency = std::max(1, parse_int(args, i, opt));
+        } else if (opt == "--enable-training") {
+            config.enable_training = true;
+        } else if (opt == "--disable-training") {
+            config.enable_training = false;
+        } else if (opt == "--training-batch") {
+            config.training_batch_size = parse_size(args, i, opt);
+        } else if (opt == "--training-rate") {
+            config.training_learning_rate = parse_double(args, i, opt);
+        } else if (opt == "--training-output") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.training_output_path = args[++i];
         } else {
             throw std::invalid_argument("Unknown selfplay option: " + opt);
         }
@@ -233,6 +293,155 @@ int run_time_analysis(const std::vector<std::string>& args) {
     return 0;
 }
 
+int run_train_command(const std::vector<std::string>& args) {
+    std::string input_path;
+    std::string output_path = "trained.nnue";
+    double learning_rate = 0.05;
+    std::size_t batch_size = 256;
+    int iterations = 1;
+    bool shuffle = false;
+
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& opt = args[i];
+        if (opt == "--input") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--input requires a path");
+            input_path = args[++i];
+        } else if (opt == "--output") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--output requires a path");
+            output_path = args[++i];
+        } else if (opt == "--rate") {
+            learning_rate = parse_double(args, i, opt);
+        } else if (opt == "--batch") {
+            batch_size = parse_size(args, i, opt);
+        } else if (opt == "--iterations") {
+            iterations = parse_int(args, i, opt);
+        } else if (opt == "--shuffle") {
+            shuffle = true;
+        }
+    }
+
+    if (input_path.empty()) {
+        throw std::invalid_argument("train command requires --input dataset path");
+    }
+
+    std::vector<TrainingExample> data = load_training_file(input_path);
+    if (data.empty()) {
+        throw std::runtime_error("No training samples loaded from " + input_path);
+    }
+
+    if (shuffle) {
+        std::mt19937 rng(static_cast<unsigned int>(std::random_device{}()));
+        std::shuffle(data.begin(), data.end(), rng);
+    }
+
+    ParameterSet parameters;
+    if (!output_path.empty() && std::filesystem::exists(output_path)) {
+        parameters.load(output_path);
+    }
+
+    Trainer trainer({learning_rate, 0.0005});
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (std::size_t offset = 0; offset < data.size(); offset += batch_size) {
+            std::size_t end = std::min(offset + batch_size, data.size());
+            std::vector<TrainingExample> batch(data.begin() + static_cast<std::ptrdiff_t>(offset),
+                                              data.begin() + static_cast<std::ptrdiff_t>(end));
+            trainer.train_batch(batch, parameters);
+        }
+    }
+
+    if (!output_path.empty()) {
+        parameters.save(output_path);
+    }
+    return 0;
+}
+
+int run_import_pgn(const std::vector<std::string>& args) {
+    std::string pgn_path;
+    std::string output_path = "dataset.txt";
+    bool include_draws = true;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& opt = args[i];
+        if (opt == "--pgn") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--pgn requires a file path");
+            pgn_path = args[++i];
+        } else if (opt == "--output") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--output requires a file path");
+            output_path = args[++i];
+        } else if (opt == "--no-draws") {
+            include_draws = false;
+        }
+    }
+
+    if (pgn_path.empty()) {
+        throw std::invalid_argument("import-pgn requires --pgn input file");
+    }
+
+    PgnImporter importer;
+    std::vector<TrainingExample> examples = importer.import_file(pgn_path, include_draws);
+    save_training_file(output_path, examples);
+    std::cout << "Wrote " << examples.size() << " training samples to " << output_path << std::endl;
+    return 0;
+}
+
+int run_teacher_command(const std::vector<std::string>& args) {
+    std::string engine_path;
+    std::string positions_path;
+    std::string output_path = "teacher_labels.txt";
+    int depth = 20;
+    int threads = 1;
+
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& opt = args[i];
+        if (opt == "--engine") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--engine requires a path");
+            engine_path = args[++i];
+        } else if (opt == "--positions") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--positions requires a file path");
+            positions_path = args[++i];
+        } else if (opt == "--output") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--output requires a file path");
+            output_path = args[++i];
+        } else if (opt == "--depth") {
+            depth = parse_int(args, i, opt);
+        } else if (opt == "--threads") {
+            threads = parse_int(args, i, opt);
+        }
+    }
+
+    if (engine_path.empty()) {
+        throw std::invalid_argument("teacher command requires --engine path");
+    }
+    if (positions_path.empty()) {
+        throw std::invalid_argument("teacher command requires --positions file");
+    }
+
+    std::ifstream positions_stream(positions_path);
+    if (!positions_stream) {
+        throw std::runtime_error("Failed to open positions file: " + positions_path);
+    }
+    std::vector<std::string> fens;
+    std::string line;
+    while (std::getline(positions_stream, line)) {
+        if (!line.empty()) {
+            fens.push_back(line);
+        }
+    }
+    if (fens.empty()) {
+        throw std::runtime_error("Positions file is empty");
+    }
+
+    TeacherEngine teacher({engine_path, depth, threads});
+    std::vector<int> scores = teacher.evaluate(fens);
+    std::vector<TrainingExample> examples;
+    examples.reserve(scores.size());
+    for (std::size_t i = 0; i < scores.size(); ++i) {
+        examples.push_back({fens[i], scores[i]});
+    }
+    save_training_file(output_path, examples);
+    std::cout << "Annotated " << examples.size() << " positions to " << output_path << std::endl;
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -247,6 +456,18 @@ int main(int argc, char** argv) {
         const std::string& command = args[0];
         if (command == "selfplay") {
             return run_selfplay(args);
+        }
+        if (command == "perft") {
+            return run_perft(args);
+        }
+        if (command == "train") {
+            return run_train_command(args);
+        }
+        if (command == "import-pgn") {
+            return run_import_pgn(args);
+        }
+        if (command == "teacher") {
+            return run_teacher_command(args);
         }
         if (command == "tune") {
             if (args.size() < 2) {

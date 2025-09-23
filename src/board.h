@@ -61,6 +61,8 @@ class Board {
 
     void make_move(const Move& move, State& out_state);
     void undo_move(const Move& move, const State& state);
+    void make_null_move(State& out_state);
+    void undo_null_move(const State& state);
 
     std::string fen() const;
 

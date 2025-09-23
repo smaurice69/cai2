@@ -32,7 +32,7 @@ SprtTester::SprtTester(SelfPlayConfig base_config, EngineConfig baseline, Engine
       baseline_(std::move(baseline)),
       candidate_(std::move(candidate)),
       sprt_(std::move(sprt_config)),
-      orchestrator_(base_config_) {
+      orchestrator_(std::make_unique<SelfPlayOrchestrator>(base_config_)) {
     double p0 = logistic(sprt_.elo0);
     double p1 = logistic(sprt_.elo1);
     double non_draw = std::max(1.0 - sprt_.draw_ratio, kEpsilon);
@@ -41,6 +41,8 @@ SprtTester::SprtTester(SelfPlayConfig base_config, EngineConfig baseline, Engine
     win_prob_h1_ = std::max(p1 * non_draw, kEpsilon);
     loss_prob_h1_ = std::max((1.0 - p1) * non_draw, kEpsilon);
 }
+
+SprtTester::~SprtTester() = default;
 
 double SprtTester::likelihood_increment(double candidate_score) const {
     if (candidate_score >= 1.0 - kEpsilon) {
@@ -80,7 +82,7 @@ SprtSummary SprtTester::run() {
         EngineConfig white = candidate_is_white ? candidate_ : baseline_;
         EngineConfig black = candidate_is_white ? baseline_ : candidate_;
 
-        SelfPlayResult result = orchestrator_.play_game(game, white, black, false);
+        SelfPlayResult result = orchestrator_->play_game(game, white, black, false);
 
         double candidate_score = 0.5;
         if (result.result == "1-0") {

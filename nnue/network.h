@@ -29,12 +29,18 @@ class Network {
 
     void load_from_file(const std::string& path);
     void load_default();
+    void save_to_file(const std::string& path) const;
 
     [[nodiscard]] bool is_loaded() const { return loaded_; }
 
     [[nodiscard]] int32_t weight(Color color, PieceType piece, int square) const;
+    void set_weight(Color color, PieceType piece, int square, int32_t value);
+    void add_weight(Color color, PieceType piece, int square, int32_t delta);
+    void set_bias(int32_t bias);
+    void set_scale(float scale);
     [[nodiscard]] int32_t bias() const { return bias_; }
     [[nodiscard]] float scale() const { return scale_; }
+    [[nodiscard]] const std::array<int32_t, kFeatureCount>& weights() const { return weights_; }
 
    private:
     bool loaded_ = false;
