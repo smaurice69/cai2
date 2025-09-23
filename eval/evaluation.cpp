@@ -1,21 +1,45 @@
 #include "evaluation.h"
 
+#include <mutex>
+
 namespace chiron {
 
 namespace {
-constexpr int kPieceValues[static_cast<int>(PieceType::King) + 1] = {100, 320, 330, 500, 900, 20000};
+std::shared_ptr<nnue::Evaluator>& evaluator_instance() {
+    static std::shared_ptr<nnue::Evaluator> instance = std::make_shared<nnue::Evaluator>();
+    return instance;
 }
 
-int evaluate(const Board& board) {
-    int score = 0;
-    for (int piece = 0; piece < kNumPieceTypes; ++piece) {
-        PieceType type = static_cast<PieceType>(piece);
-        int value = kPieceValues[piece];
-        score += value * popcount(board.pieces(Color::White, type));
-        score -= value * popcount(board.pieces(Color::Black, type));
-    }
+std::mutex& evaluator_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+}  // namespace
 
-    return board.side_to_move() == Color::White ? score : -score;
+int evaluate(const Board& board) {
+    auto evaluator = global_evaluator();
+    nnue::Accumulator accum;
+    evaluator->build_accumulator(board, accum);
+    return evaluator->evaluate(board, accum);
+}
+
+std::shared_ptr<nnue::Evaluator> global_evaluator() {
+    std::lock_guard<std::mutex> lock(evaluator_mutex());
+    auto& instance = evaluator_instance();
+    if (!instance) {
+        instance = std::make_shared<nnue::Evaluator>();
+    }
+    instance->ensure_network_loaded();
+    return instance;
+}
+
+void set_global_network_path(const std::string& path) {
+    std::lock_guard<std::mutex> lock(evaluator_mutex());
+    auto& instance = evaluator_instance();
+    if (!instance) {
+        instance = std::make_shared<nnue::Evaluator>();
+    }
+    instance->set_network_path(path);
 }
 
 }  // namespace chiron

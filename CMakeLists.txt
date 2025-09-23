@@ -17,12 +17,20 @@ add_library(chiron_lib
     src/uci.cpp
     src/zobrist.cpp
     eval/evaluation.cpp
+    nnue/network.cpp
+    nnue/evaluator.cpp
+    training/selfplay.cpp
+    tools/tuning.cpp
 )
 
 target_include_directories(chiron_lib
     PUBLIC
+        ${PROJECT_SOURCE_DIR}
         ${PROJECT_SOURCE_DIR}/src
         ${PROJECT_SOURCE_DIR}/eval
+        ${PROJECT_SOURCE_DIR}/nnue
+        ${PROJECT_SOURCE_DIR}/training
+        ${PROJECT_SOURCE_DIR}/tools
 )
 
 if (MSVC)
@@ -43,7 +51,11 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_executable(chiron_tests tests/test_perft.cpp)
+add_executable(chiron_tests
+    tests/test_perft.cpp
+    tests/test_nnue.cpp
+    tests/test_selfplay.cpp
+)
 target_link_libraries(chiron_tests PRIVATE chiron_lib GTest::gtest_main)
 
 include(GoogleTest)
