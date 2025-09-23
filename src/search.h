@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "board.h"
 #include "movegen.h"
+#include "nnue/evaluator.h"
 
 namespace chiron {
 
@@ -13,10 +15,12 @@ namespace chiron {
  */
 class Search {
    public:
-    explicit Search(std::size_t table_size = 1 << 20);
+    explicit Search(std::size_t table_size = 1 << 20, std::shared_ptr<nnue::Evaluator> evaluator = nullptr);
 
     Move search_best_move(Board& board, int max_depth);
     void clear();
+
+    void set_evaluator(std::shared_ptr<nnue::Evaluator> evaluator) { evaluator_ = std::move(evaluator); }
 
    private:
     struct TTEntry {
@@ -28,6 +32,9 @@ class Search {
     };
 
     std::vector<TTEntry> table_;
+
+    std::shared_ptr<nnue::Evaluator> evaluator_;
+    std::vector<nnue::Accumulator> accumulator_stack_;
 
     [[nodiscard]] TTEntry& entry_for_key(std::uint64_t key);
     [[nodiscard]] const TTEntry& entry_for_key(std::uint64_t key) const;

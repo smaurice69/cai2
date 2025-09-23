@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "evaluation.h"
+
 namespace chiron {
 
 UCI::UCI() : board_(), search_(1 << 20) {}
@@ -22,6 +24,8 @@ void UCI::loop() {
             handle_position(line);
         } else if (line.rfind("go", 0) == 0) {
             handle_go(line);
+        } else if (line.rfind("setoption", 0) == 0) {
+            handle_setoption(line);
         } else if (line == "ucinewgame") {
             board_.set_start_position();
             search_.clear();
@@ -74,6 +78,38 @@ void UCI::handle_position(const std::string& command) {
             Board::State state;
             board_.make_move(move, state);
             ++index;
+        }
+    }
+}
+
+void UCI::handle_setoption(const std::string& command) {
+    std::istringstream iss(command);
+    std::string token;
+    iss >> token;  // setoption
+    std::string name;
+    while (iss >> token && token != "value") {
+        if (token == "name") {
+            continue;
+        }
+        if (!name.empty()) {
+            name += ' ';
+        }
+        name += token;
+    }
+
+    std::string value;
+    if (token == "value") {
+        std::getline(iss, value);
+        if (!value.empty() && value.front() == ' ') {
+            value.erase(value.begin());
+        }
+    }
+
+    if (name == "NNUENetworkFile" || name == "EvalNetwork") {
+        if (!value.empty()) {
+            set_global_network_path(value);
+            search_.set_evaluator(global_evaluator());
+            std::cout << "info string nnue network set to " << value << std::endl;
         }
     }
 }
