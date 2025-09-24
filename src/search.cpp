@@ -611,8 +611,9 @@ std::vector<Move> Search::extract_pv(Board& board) const {
     std::vector<Board::State> states;
     states.reserve(64);
     for (int depth = 0; depth < 64; ++depth) {
-        const TTEntry& entry = entry_for_key(copy.zobrist_key());
-        if (entry.flag == static_cast<std::uint8_t>(TTFlag::Empty)) {
+        std::uint64_t key = copy.zobrist_key();
+        const TTEntry& entry = entry_for_key(key);
+        if (entry.flag == static_cast<std::uint8_t>(TTFlag::Empty) || entry.key != key) {
             break;
         }
         Move move = entry.move;
