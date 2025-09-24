@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <exception>
-#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -168,6 +168,9 @@ int run_selfplay(const std::vector<std::string>& args) {
         } else if (opt == "--training-output") {
             if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
             config.training_output_path = args[++i];
+        } else if (opt == "--training-history") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.training_history_dir = args[++i];
         } else {
             throw std::invalid_argument("Unknown selfplay option: " + opt);
         }
@@ -252,6 +255,13 @@ int run_sprt(const std::vector<std::string>& args) {
     std::cout << "Games: " << summary.games_played << ", candidate wins: " << summary.candidate_wins
               << ", baseline wins: " << summary.baseline_wins << ", draws: " << summary.draws << "\n";
     std::cout << "LLR: " << summary.llr << "\n";
+    if (summary.elo) {
+        std::cout << "Estimated Elo: " << std::fixed << std::setprecision(2) << *summary.elo;
+        if (summary.elo_confidence) {
+            std::cout << " ±" << *summary.elo_confidence;
+        }
+        std::cout << std::defaultfloat << std::setprecision(6) << "\n";
+    }
     return 0;
 }
 

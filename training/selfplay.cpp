@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <ctime>
 #include <iomanip>
 #include <ios>
@@ -221,6 +222,18 @@ SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
     : config_(std::move(config)),
       rng_(config_.seed != 0U ? config_.seed : static_cast<unsigned int>(std::random_device{}())),
       trainer_(Trainer::Config{config_.training_learning_rate, 0.0005}) {
+    if (!config_.training_output_path.empty()) {
+        std::filesystem::path output_path(config_.training_output_path);
+        training_history_prefix_ = output_path.stem().string();
+        training_history_extension_ = output_path.extension().string();
+    }
+    if (training_history_prefix_.empty()) {
+        training_history_prefix_ = "chiron-selfplay";
+    }
+    if (training_history_extension_.empty()) {
+        training_history_extension_ = ".nnue";
+    }
+
     if (config_.enable_training) {
         config_.record_fens = true;
         if (!config_.training_output_path.empty() && std::filesystem::exists(config_.training_output_path)) {
@@ -228,12 +241,15 @@ SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
             set_global_network_path(config_.training_output_path);
         }
         training_buffer_.reserve(config_.training_batch_size);
-        if (config_.white.network_path.empty() && !config_.training_output_path.empty()) {
+        if (config_.white.network_path.empty() && !config_.training_output_path.empty() &&
+            std::filesystem::exists(config_.training_output_path)) {
             config_.white.network_path = config_.training_output_path;
         }
-        if (config_.black.network_path.empty() && !config_.training_output_path.empty()) {
+        if (config_.black.network_path.empty() && !config_.training_output_path.empty() &&
+            std::filesystem::exists(config_.training_output_path)) {
             config_.black.network_path = config_.training_output_path;
         }
+        training_iteration_ = detect_existing_history_iteration();
     }
 }
 
@@ -248,10 +264,18 @@ void SelfPlayOrchestrator::ensure_streams() {
     std::ios_base::openmode mode = std::ios::out;
     mode |= config_.append_logs ? std::ios::app : std::ios::trunc;
     if (config_.capture_results && !config_.results_log.empty()) {
-        results_stream_.open(config_.results_log, mode);
+        std::filesystem::path results_path(config_.results_log);
+        if (results_path.has_parent_path()) {
+            std::filesystem::create_directories(results_path.parent_path());
+        }
+        results_stream_.open(results_path, mode);
     }
     if (config_.capture_pgn && !config_.pgn_path.empty()) {
-        pgn_stream_.open(config_.pgn_path, mode);
+        std::filesystem::path pgn_path(config_.pgn_path);
+        if (pgn_path.has_parent_path()) {
+            std::filesystem::create_directories(pgn_path.parent_path());
+        }
+        pgn_stream_.open(pgn_path, mode);
     }
     streams_open_ = true;
 }
@@ -470,12 +494,65 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
         trainer_.train_batch(training_buffer_, parameters_);
         training_buffer_.clear();
         if (!config_.training_output_path.empty()) {
-            parameters_.save(config_.training_output_path);
-            set_global_network_path(config_.training_output_path);
-            config_.white.network_path = config_.training_output_path;
-            config_.black.network_path = config_.training_output_path;
+            std::filesystem::path output_path(config_.training_output_path);
+            if (output_path.has_parent_path()) {
+                std::filesystem::create_directories(output_path.parent_path());
+            }
+            parameters_.save(output_path.string());
+            set_global_network_path(output_path.string());
+            config_.white.network_path = output_path.string();
+            config_.black.network_path = output_path.string();
+
+            ++training_iteration_;
+            if (!config_.training_history_dir.empty()) {
+                std::filesystem::path history_dir(config_.training_history_dir);
+                std::filesystem::create_directories(history_dir);
+                std::ostringstream name;
+                name << training_history_prefix_ << "-iter" << std::setw(6) << std::setfill('0')
+                     << training_iteration_;
+                std::filesystem::path snapshot = history_dir / (name.str() + training_history_extension_);
+                parameters_.save(snapshot.string());
+            }
         }
     }
+}
+
+int SelfPlayOrchestrator::detect_existing_history_iteration() const {
+    if (config_.training_history_dir.empty()) {
+        return 0;
+    }
+    std::filesystem::path history_dir(config_.training_history_dir);
+    if (!std::filesystem::exists(history_dir)) {
+        return 0;
+    }
+    const std::string prefix = training_history_prefix_ + "-iter";
+    int max_iter = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(history_dir)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        if (!training_history_extension_.empty() &&
+            entry.path().extension().string() != training_history_extension_) {
+            continue;
+        }
+        std::string stem = entry.path().stem().string();
+        if (stem.rfind(prefix, 0) != 0) {
+            continue;
+        }
+        std::string digits = stem.substr(prefix.size());
+        if (digits.empty()) {
+            continue;
+        }
+        try {
+            int value = std::stoi(digits);
+            if (value > max_iter) {
+                max_iter = value;
+            }
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+    return max_iter;
 }
 
 }  // namespace chiron
