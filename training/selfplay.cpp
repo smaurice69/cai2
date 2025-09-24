@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <exception>
 #include <ctime>
 #include <iomanip>
 #include <ios>
 #include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -215,12 +218,69 @@ std::shared_ptr<nnue::Evaluator> create_evaluator(const EngineConfig& config) {
     return evaluator;
 }
 
+constexpr int kMateValue = 32000;
+constexpr int kMateThreshold = kMateValue - 512;
+
+std::string color_name(Color color) {
+    return color == Color::White ? "White" : "Black";
+}
+
+std::string format_evaluation(int score, Color mover) {
+    std::ostringstream oss;
+    if (std::abs(score) >= kMateThreshold) {
+        int mate_moves = (kMateValue - std::abs(score) + 1) / 2;
+        Color winner = score > 0 ? mover : opposite_color(mover);
+        if (score < 0) {
+            oss << "-M" << mate_moves;
+        } else {
+            oss << "+M" << mate_moves;
+        }
+        oss << " (" << color_name(winner) << " mates in " << mate_moves << ')';
+    } else {
+        double pawns = static_cast<double>(score) / 100.0;
+        oss << std::showpos << std::fixed << std::setprecision(2) << pawns << std::noshowpos;
+        oss << " (" << score << " cp for " << color_name(mover) << ')';
+    }
+    return oss.str();
+}
+
+std::string format_pv(Board board, const std::vector<Move>& pv) {
+    if (pv.empty()) {
+        return std::string{};
+    }
+    std::ostringstream oss;
+    bool first = true;
+    for (const Move& move : pv) {
+        if (!first) {
+            oss << ' ';
+        }
+        std::string san = move_to_san(board, move);
+        oss << san;
+        Board::State state;
+        board.make_move(move, state);
+        first = false;
+    }
+    return oss.str();
+}
+
 }  // namespace
 
 SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
     : config_(std::move(config)),
       rng_(config_.seed != 0U ? config_.seed : static_cast<unsigned int>(std::random_device{}())),
       trainer_(Trainer::Config{config_.training_learning_rate, 0.0005}) {
+    if (!config_.training_output_path.empty()) {
+        std::filesystem::path output_path(config_.training_output_path);
+        training_history_prefix_ = output_path.stem().string();
+        training_history_extension_ = output_path.extension().string();
+    }
+    if (training_history_prefix_.empty()) {
+        training_history_prefix_ = "chiron-selfplay";
+    }
+    if (training_history_extension_.empty()) {
+        training_history_extension_ = ".nnue";
+    }
+
     if (config_.enable_training) {
         config_.record_fens = true;
         if (!config_.training_output_path.empty() && std::filesystem::exists(config_.training_output_path)) {
@@ -228,12 +288,17 @@ SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
             set_global_network_path(config_.training_output_path);
         }
         training_buffer_.reserve(config_.training_batch_size);
-        if (config_.white.network_path.empty() && !config_.training_output_path.empty()) {
+        if (config_.white.network_path.empty() && !config_.training_output_path.empty() &&
+            std::filesystem::exists(config_.training_output_path)) {
             config_.white.network_path = config_.training_output_path;
         }
-        if (config_.black.network_path.empty() && !config_.training_output_path.empty()) {
+        if (config_.black.network_path.empty() && !config_.training_output_path.empty() &&
+            std::filesystem::exists(config_.training_output_path)) {
             config_.black.network_path = config_.training_output_path;
         }
+        training_iteration_ = detect_existing_history_iteration();
+        total_positions_trained_ = static_cast<std::size_t>(training_iteration_) * config_.training_batch_size;
+        total_positions_collected_ = total_positions_trained_;
     }
 }
 
@@ -248,10 +313,18 @@ void SelfPlayOrchestrator::ensure_streams() {
     std::ios_base::openmode mode = std::ios::out;
     mode |= config_.append_logs ? std::ios::app : std::ios::trunc;
     if (config_.capture_results && !config_.results_log.empty()) {
-        results_stream_.open(config_.results_log, mode);
+        std::filesystem::path results_path(config_.results_log);
+        if (results_path.has_parent_path()) {
+            std::filesystem::create_directories(results_path.parent_path());
+        }
+        results_stream_.open(results_path, mode);
     }
     if (config_.capture_pgn && !config_.pgn_path.empty()) {
-        pgn_stream_.open(config_.pgn_path, mode);
+        std::filesystem::path pgn_path(config_.pgn_path);
+        if (pgn_path.has_parent_path()) {
+            std::filesystem::create_directories(pgn_path.parent_path());
+        }
+        pgn_stream_.open(pgn_path, mode);
     }
     streams_open_ = true;
 }
@@ -260,6 +333,37 @@ void SelfPlayOrchestrator::run() {
     ensure_streams();
     int total_games = config_.games;
     int concurrency = std::max(1, config_.concurrency);
+    if (config_.verbose) {
+        std::ostringstream header;
+        header << "[SelfPlay] Starting " << total_games << " game(s) with concurrency " << concurrency
+               << ". Max ply " << config_.max_ply << '.';
+        log_verbose(header.str());
+
+        std::ostringstream engines;
+        engines << "[SelfPlay] White " << config_.white.name << " (depth " << config_.white.max_depth
+                << ", threads " << config_.white.threads << ", net "
+                << (config_.white.network_path.empty() ? "<default>" : config_.white.network_path) << ") | Black "
+                << config_.black.name << " (depth " << config_.black.max_depth << ", threads "
+                << config_.black.threads << ", net "
+                << (config_.black.network_path.empty() ? "<default>" : config_.black.network_path) << ')';
+        log_verbose(engines.str());
+
+        if (config_.enable_training) {
+            std::ostringstream train;
+            train << "[Train] Batch size " << config_.training_batch_size << ", learning rate "
+                  << config_.training_learning_rate;
+            if (!config_.training_output_path.empty()) {
+                train << ", output " << config_.training_output_path;
+            } else {
+                train << ", output <none>";
+            }
+            if (!config_.training_history_dir.empty()) {
+                train << ", history " << config_.training_history_dir;
+            }
+            train << ". Previously trained positions " << total_positions_trained_ << '.';
+            log_verbose(train.str());
+        }
+    }
     std::atomic<int> next_game{0};
     std::vector<std::thread> workers;
     workers.reserve(static_cast<std::size_t>(concurrency));
@@ -287,6 +391,15 @@ void SelfPlayOrchestrator::run() {
 SelfPlayResult SelfPlayOrchestrator::play_game(int game_index, const EngineConfig& white, const EngineConfig& black,
                                                bool log_outputs) {
     ensure_streams();
+    if (config_.verbose) {
+        std::ostringstream start;
+        start << "[Game " << (game_index + 1) << "] Start: " << white.name << " (White, depth "
+              << white.max_depth << ", threads " << white.threads << ", net "
+              << (white.network_path.empty() ? "<default>" : white.network_path) << ") vs " << black.name
+              << " (Black, depth " << black.max_depth << ", threads " << black.threads << ", net "
+              << (black.network_path.empty() ? "<default>" : black.network_path) << ')';
+        log_verbose(start.str());
+    }
     SelfPlayResult result = play_single_game(game_index, white, black);
     if (log_outputs) {
         if (config_.capture_results && results_stream_) {
@@ -297,10 +410,22 @@ SelfPlayResult SelfPlayOrchestrator::play_game(int game_index, const EngineConfi
         }
     }
     handle_training(result);
+    if (config_.verbose) {
+        std::ostringstream summary;
+        summary << "[Game " << (game_index + 1) << "] Final: " << result.result << " (" << result.termination
+                << ") after " << result.ply_count << " ply in " << std::fixed << std::setprecision(2)
+                << (result.duration_ms / 1000.0) << "s";
+        if (config_.enable_training) {
+            std::size_t added = 1 + result.fens.size();
+            summary << ". Positions collected " << added << " (total collected " << total_positions_collected_
+                    << ", trained " << total_positions_trained_ << ")";
+        }
+        log_verbose(summary.str());
+    }
     return result;
 }
 
-SelfPlayResult SelfPlayOrchestrator::play_single_game(int /*game_index*/, const EngineConfig& white,
+SelfPlayResult SelfPlayOrchestrator::play_single_game(int game_index, const EngineConfig& white,
                                                       const EngineConfig& black) {
     Board board;
     board.set_start_position();
@@ -355,6 +480,38 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int /*game_index*/, const 
         }
 
         std::string san = move_to_san(board, best);
+        if (config_.verbose) {
+            Board pv_board = board;
+            std::string pv_san = format_pv(pv_board, search_result.pv);
+            double elapsed_ms = static_cast<double>(search_result.elapsed.count());
+            std::uint64_t nps = 0;
+            if (elapsed_ms > 0.0) {
+                nps = static_cast<std::uint64_t>(static_cast<double>(search_result.nodes) * 1000.0 / elapsed_ms);
+            }
+            int move_number = ply / 2 + 1;
+            Color mover = board.side_to_move();
+            const std::string& player_name = (mover == Color::White) ? white.name : black.name;
+            std::ostringstream move_log;
+            move_log << "[Game " << (game_index + 1) << "] " << move_number
+                     << (mover == Color::White ? ". " : "... ") << player_name << " (" << color_name(mover)
+                     << ") plays " << san;
+            move_log << " | eval " << format_evaluation(search_result.score, mover);
+            move_log << " | depth " << search_result.depth;
+            if (search_result.seldepth > 0) {
+                move_log << " (sel " << search_result.seldepth << ')';
+            }
+            move_log << " | nodes " << static_cast<unsigned long long>(search_result.nodes);
+            if (elapsed_ms > 0.0) {
+                move_log << " | time " << static_cast<long long>(search_result.elapsed.count()) << "ms";
+            }
+            if (nps > 0) {
+                move_log << " | nps " << static_cast<unsigned long long>(nps);
+            }
+            if (!pv_san.empty()) {
+                move_log << " | pv " << pv_san;
+            }
+            log_verbose(move_log.str());
+        }
         result.moves_san.push_back(std::move(san));
 
         Board::State state;
@@ -466,16 +623,110 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
         training_buffer_.push_back({fen, target});
     }
 
+    std::size_t added = 1 + result.fens.size();
+    total_positions_collected_ += added;
+    if (config_.verbose) {
+        std::ostringstream collect;
+        collect << "[Train] Collected " << added << " positions (buffer " << training_buffer_.size() << '/'
+                << config_.training_batch_size << ", total collected " << total_positions_collected_ << ')';
+        log_verbose(collect.str());
+    }
+
     if (training_buffer_.size() >= config_.training_batch_size) {
+        std::size_t batch = training_buffer_.size();
         trainer_.train_batch(training_buffer_, parameters_);
         training_buffer_.clear();
+        total_positions_trained_ += batch;
+        ++training_iteration_;
+
+        std::string updated_network_path;
+        std::string snapshot_path;
         if (!config_.training_output_path.empty()) {
-            parameters_.save(config_.training_output_path);
-            set_global_network_path(config_.training_output_path);
-            config_.white.network_path = config_.training_output_path;
-            config_.black.network_path = config_.training_output_path;
+            std::filesystem::path output_path(config_.training_output_path);
+            if (output_path.has_parent_path()) {
+                std::filesystem::create_directories(output_path.parent_path());
+            }
+            parameters_.save(output_path.string());
+            set_global_network_path(output_path.string());
+            config_.white.network_path = output_path.string();
+            config_.black.network_path = output_path.string();
+            updated_network_path = output_path.string();
+
+            if (!config_.training_history_dir.empty()) {
+                std::filesystem::path history_dir(config_.training_history_dir);
+                std::filesystem::create_directories(history_dir);
+                std::ostringstream name;
+                name << training_history_prefix_ << "-iter" << std::setw(6) << std::setfill('0')
+                     << training_iteration_;
+                std::filesystem::path snapshot = history_dir / (name.str() + training_history_extension_);
+                parameters_.save(snapshot.string());
+                snapshot_path = snapshot.string();
+            }
+        }
+
+        if (config_.verbose) {
+            std::ostringstream train_msg;
+            train_msg << "[Train] Iteration " << training_iteration_ << " trained on " << batch
+                      << " positions (total trained " << total_positions_trained_ << ')';
+            if (!updated_network_path.empty()) {
+                train_msg << ". Updated network: " << updated_network_path;
+            } else {
+                train_msg << ". Updated in-memory weights (no output path).";
+            }
+            log_verbose(train_msg.str());
+            if (!snapshot_path.empty()) {
+                std::ostringstream snapshot_msg;
+                snapshot_msg << "[Train] Snapshot saved to " << snapshot_path;
+                log_verbose(snapshot_msg.str());
+            }
         }
     }
+}
+
+void SelfPlayOrchestrator::log_verbose(const std::string& message) {
+    if (!config_.verbose) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    std::cout << message << std::endl;
+}
+
+int SelfPlayOrchestrator::detect_existing_history_iteration() const {
+    if (config_.training_history_dir.empty()) {
+        return 0;
+    }
+    std::filesystem::path history_dir(config_.training_history_dir);
+    if (!std::filesystem::exists(history_dir)) {
+        return 0;
+    }
+    const std::string prefix = training_history_prefix_ + "-iter";
+    int max_iter = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(history_dir)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        if (!training_history_extension_.empty() &&
+            entry.path().extension().string() != training_history_extension_) {
+            continue;
+        }
+        std::string stem = entry.path().stem().string();
+        if (stem.rfind(prefix, 0) != 0) {
+            continue;
+        }
+        std::string digits = stem.substr(prefix.size());
+        if (digits.empty()) {
+            continue;
+        }
+        try {
+            int value = std::stoi(digits);
+            if (value > max_iter) {
+                max_iter = value;
+            }
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+    return max_iter;
 }
 
 }  // namespace chiron

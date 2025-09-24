@@ -4,7 +4,10 @@
 
 namespace chiron {
 
-std::ostream& operator<<(std::ostream& os, Bitboard b) {
+BitboardPretty pretty(Bitboard b) { return BitboardPretty{b}; }
+
+std::ostream& operator<<(std::ostream& os, BitboardPretty pretty) {
+    Bitboard b = pretty.value;
     for (int rank = 7; rank >= 0; --rank) {
         os << rank + 1 << " ";
         for (int file = 0; file < 8; ++file) {

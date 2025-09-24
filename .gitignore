@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+# Build trees and generated artefacts
+build/
+*.jsonl
+*.pgn
+*.nnue
+nnue/models/

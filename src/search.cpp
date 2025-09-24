@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <tuple>
 
 #include "evaluation.h"
 
@@ -273,7 +274,6 @@ int Search::search_root(Board& board, int depth, int alpha, int beta) {
     int alpha_original = alpha;
     int best_score = -kInfinity;
     Move best_move_local{};
-    int move_index = 0;
 
     for (const Move& move : moves) {
         if (should_stop()) {
@@ -302,8 +302,6 @@ int Search::search_root(Board& board, int depth, int alpha, int beta) {
         if (value > alpha) {
             alpha = value;
         }
-
-        ++move_index;
 
         if (alpha >= beta) {
             break;
@@ -383,21 +381,31 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
         return 0;
     }
 
+    const auto move_order_key = [&](const Move& move) {
+        int tier = 0;
+        int primary = 0;
+        int secondary = 0;
+        if (same_move(move, tt_move)) {
+            tier = 3;
+        } else if (move.is_capture()) {
+            tier = 2;
+            primary = mvv_lva(move, board);
+        } else {
+            const auto& killers = killer_moves_[ply];
+            if (same_move(move, killers[0])) {
+                tier = 1;
+                primary = 2;
+            } else if (same_move(move, killers[1])) {
+                tier = 1;
+                primary = 1;
+            }
+            secondary = history_score(move, board.side_to_move());
+        }
+        return std::make_tuple(tier, primary, secondary);
+    };
+
     std::stable_sort(moves.begin(), moves.end(), [&](const Move& lhs, const Move& rhs) {
-        if (same_move(lhs, tt_move) != same_move(rhs, tt_move)) {
-            return same_move(lhs, tt_move);
-        }
-        if (lhs.is_capture() || rhs.is_capture()) {
-            return mvv_lva(lhs, board) > mvv_lva(rhs, board);
-        }
-        const auto& killers = killer_moves_[ply];
-        if (same_move(lhs, killers[0]) || same_move(lhs, killers[1])) {
-            return true;
-        }
-        if (same_move(rhs, killers[0]) || same_move(rhs, killers[1])) {
-            return false;
-        }
-        return history_score(lhs, board.side_to_move()) > history_score(rhs, board.side_to_move());
+        return move_order_key(lhs) > move_order_key(rhs);
     });
 
     Move best_move{};
@@ -611,8 +619,9 @@ std::vector<Move> Search::extract_pv(Board& board) const {
     std::vector<Board::State> states;
     states.reserve(64);
     for (int depth = 0; depth < 64; ++depth) {
-        const TTEntry& entry = entry_for_key(copy.zobrist_key());
-        if (entry.flag == static_cast<std::uint8_t>(TTFlag::Empty)) {
+        std::uint64_t key = copy.zobrist_key();
+        const TTEntry& entry = entry_for_key(key);
+        if (entry.flag == static_cast<std::uint8_t>(TTFlag::Empty) || entry.key != key) {
             break;
         }
         Move move = entry.move;
