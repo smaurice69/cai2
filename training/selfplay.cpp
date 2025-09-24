@@ -297,6 +297,7 @@ SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
             config_.black.network_path = config_.training_output_path;
         }
         training_iteration_ = detect_existing_history_iteration();
+
         total_positions_trained_ = static_cast<std::size_t>(training_iteration_) * config_.training_batch_size;
         total_positions_collected_ = total_positions_trained_;
     }
@@ -650,6 +651,7 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
             set_global_network_path(output_path.string());
             config_.white.network_path = output_path.string();
             config_.black.network_path = output_path.string();
+
             updated_network_path = output_path.string();
 
             if (!config_.training_history_dir.empty()) {
@@ -660,6 +662,7 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
                      << training_iteration_;
                 std::filesystem::path snapshot = history_dir / (name.str() + training_history_extension_);
                 parameters_.save(snapshot.string());
+
                 snapshot_path = snapshot.string();
             }
         }
@@ -689,6 +692,7 @@ void SelfPlayOrchestrator::log_verbose(const std::string& message) {
     }
     std::lock_guard<std::mutex> lock(log_mutex_);
     std::cout << message << std::endl;
+
 }
 
 int SelfPlayOrchestrator::detect_existing_history_iteration() const {
