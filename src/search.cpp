@@ -274,7 +274,6 @@ int Search::search_root(Board& board, int depth, int alpha, int beta) {
     int alpha_original = alpha;
     int best_score = -kInfinity;
     Move best_move_local{};
-    int move_index = 0;
 
     for (const Move& move : moves) {
         if (should_stop()) {
@@ -303,8 +302,6 @@ int Search::search_root(Board& board, int depth, int alpha, int beta) {
         if (value > alpha) {
             alpha = value;
         }
-
-        ++move_index;
 
         if (alpha >= beta) {
             break;

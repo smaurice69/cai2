@@ -112,9 +112,21 @@ constexpr inline Bitboard south_east(Bitboard b) { return (b & 0x7f7f7f7f7f7f7f7
 constexpr inline Bitboard south_west(Bitboard b) { return (b & 0xfefefefefefefefeULL) >> 9; }
 
 /**
+ * @brief Wrapper used to pretty-print bitboards without colliding with integer overloads.
+ */
+struct BitboardPretty {
+    Bitboard value;
+};
+
+/**
+ * @brief Helper that returns a printable wrapper for @p b.
+ */
+[[nodiscard]] BitboardPretty pretty(Bitboard b);
+
+/**
  * @brief Convenience stream operator for printing bitboards during debugging.
  */
-std::ostream& operator<<(std::ostream& os, Bitboard b);
+std::ostream& operator<<(std::ostream& os, BitboardPretty pretty);
 
 }  // namespace chiron
 
