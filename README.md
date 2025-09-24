@@ -130,7 +130,13 @@ Key options:
 * `--training-output PATH` – Where to store the continually updated NNUE weights.
 * `--training-history DIR` – Optional directory for archiving per-step snapshots.
 
+* `--verbose` – Print per-move search telemetry and training updates during self-play.
+
 Training batches are accumulated from every game (start position plus subsequent FENs). When the buffer exceeds the requested batch size, the trainer performs an optimisation step, saves the updated network, and reloads it for subsequent games.
+
+### Verbose Telemetry
+
+Enable `--verbose` to monitor self-play in real time. Each move is reported with its SAN notation, search depth/seldepth, evaluation (centipawns or mate score), node counts, NPS, elapsed time, and the current principal variation—useful insight for chess programmers inspecting move ordering and search stability. After every game, and whenever the training buffer flushes, verbose mode also prints how many positions were collected, the running totals processed, and where updated NNUE weights and history snapshots were written, giving AI practitioners clear feedback on dataset growth and model iteration cadence.
 
 ### Model Storage
 

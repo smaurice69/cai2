@@ -120,6 +120,8 @@ int run_selfplay(const std::vector<std::string>& args) {
             config.capture_pgn = false;
         } else if (opt == "--record-fens") {
             config.record_fens = true;
+        } else if (opt == "--verbose") {
+            config.verbose = true;
         } else if (opt == "--max-ply") {
             config.max_ply = parse_int(args, i, opt);
         } else if (opt == "--seed") {
