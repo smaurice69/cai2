@@ -26,7 +26,27 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-On Windows with MSVC, run the commands from a Developer Command Prompt. Replace `Release` with `Debug` as required.
+#### Windows (Visual Studio 2022)
+
+Open a **Developer Command Prompt for VS 2022** and generate the solution explicitly:
+
+```bash
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+You can open the resulting solution in Visual Studio or let the VS Code CMake Tools extension drive the build.
+
+#### macOS (Apple Silicon)
+
+Install the Xcode Command Line Tools (`xcode-select --install`) and ensure recent CMake binaries are available (e.g. `brew install cmake ninja`). Build a native arm64 binary with:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
+ninja -C build
+```
+
+These presets work seamlessly inside VS Code's integrated terminal on macOS.
 
 ### Running Tests
 
@@ -69,6 +89,19 @@ The `chiron` executable also exposes a suite of helper commands:
 | `teacher --engine /path/to/uci --positions fens.txt [--output labels.txt] [--depth 20] [--threads 4]` | Calls an external UCI engine to annotate positions with evaluations. |
 | `tune sprt ...` / `tune time ...` | Existing tuning utilities for SPRT matches and time-heuristic analysis. |
 
+## Measuring Playing Strength
+
+Use the SPRT harness to compare two binaries or network revisions and obtain an Elo estimate with confidence bounds:
+
+```bash
+./chiron tune sprt --games 400 --elo0 0 --elo1 20 \
+  --baseline-name Baseline --candidate-name Candidate \
+  --baseline-network nnue/models/baseline.nnue \
+  --candidate-network nnue/models/chiron-selfplay-latest.nnue
+```
+
+The summary reports the SPRT conclusion, win/draw statistics, and the estimated Elo difference ± one 95% confidence interval, making it easy to track progress toward ambitious rating targets (3000+ Elo).
+
 ## Self-Play and Training
 
 Launch concurrent self-play with optional training:
@@ -81,7 +114,8 @@ Launch concurrent self-play with optional training:
   --enable-training \
   --training-batch 512 \
   --training-rate 0.05 \
-  --training-output trained.nnue \
+  --training-output nnue/models/chiron-selfplay-latest.nnue \
+  --training-history nnue/models/history \
   --results results.jsonl \
   --pgn games.pgn
 ```
@@ -93,9 +127,14 @@ Key options:
 * `--enable-training` – Collect FENs and periodically update the evaluator.
 * `--training-batch SIZE` – Number of samples per optimisation step.
 * `--training-rate RATE` – Learning rate for the internal trainer.
-* `--training-output PATH` – Where to store updated NNUE weights.
+* `--training-output PATH` – Where to store the continually updated NNUE weights.
+* `--training-history DIR` – Optional directory for archiving per-step snapshots.
 
 Training batches are accumulated from every game (start position plus subsequent FENs). When the buffer exceeds the requested batch size, the trainer performs an optimisation step, saves the updated network, and reloads it for subsequent games.
+
+### Model Storage
+
+By default the latest self-play network is written to `nnue/models/chiron-selfplay-latest.nnue`. Each optimisation step also writes a snapshot to `nnue/models/history/<prefix>-iterXXXX.nnue`. Both paths are configurable via `--training-output` and `--training-history`, and required directories are created automatically on Windows, macOS, and Linux.
 
 ## Dataset & Teacher Workflow
 
