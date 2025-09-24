@@ -126,6 +126,17 @@ SprtSummary SprtTester::run() {
     summary.baseline_wins = baseline_wins_;
     summary.draws = draws_;
 
+    double wins = static_cast<double>(candidate_wins_) + 0.5 * static_cast<double>(draws_);
+    double losses = static_cast<double>(baseline_wins_) + 0.5 * static_cast<double>(draws_);
+    if (wins > 0.0 && losses > 0.0) {
+        double ratio = wins / losses;
+        double elo = 400.0 * std::log10(ratio);
+        double variance = (1.0 / wins) + (1.0 / losses);
+        double sigma = (400.0 / std::log(10.0)) * std::sqrt(variance);
+        summary.elo = elo;
+        summary.elo_confidence = 1.96 * sigma;
+    }
+
     if (log_stream) {
         log_stream.flush();
     }
