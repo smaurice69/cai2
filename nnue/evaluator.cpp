@@ -116,6 +116,7 @@ int Evaluator::evaluate(const Board& board, const Accumulator& accum) const {
     int32_t raw = white_sum - black_sum + network_.bias();
     double scaled = static_cast<double>(raw) * static_cast<double>(network_.scale());
     int score = static_cast<int>(std::llround(scaled));
+    score = std::clamp(score, -kMaxEvaluationMagnitude, kMaxEvaluationMagnitude);
     return board.side_to_move() == Color::White ? score : -score;
 }
 

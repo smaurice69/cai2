@@ -12,6 +12,9 @@
 
 namespace chiron::nnue {
 
+// Clamp evaluations so runaway training updates cannot be mistaken for mate scores.
+constexpr int kMaxEvaluationMagnitude = 30000;
+
 /**
  * @brief Accumulator storing the summed NNUE feature contributions for both colors.
  */
