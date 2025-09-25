@@ -519,6 +519,7 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int game_index, const Engi
         } else {
             search_result = current_search.search(board, limits);
         }
+
         Move best = search_result.best_move;
         if (is_null_move(best)) {
             bool in_check = board.in_check(board.side_to_move());
