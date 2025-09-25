@@ -376,9 +376,16 @@ void SelfPlayOrchestrator::run() {
                 if (game >= total_games) {
                     break;
                 }
-                EngineConfig white = config_.white;
-                EngineConfig black = config_.black;
-                if (config_.alternate_colors && (game % 2 == 1)) {
+                EngineConfig white;
+                EngineConfig black;
+                bool alternate_colors = false;
+                {
+                    std::lock_guard<std::mutex> config_lock(config_mutex_);
+                    white = config_.white;
+                    black = config_.black;
+                    alternate_colors = config_.alternate_colors;
+                }
+                if (alternate_colors && (game % 2 == 1)) {
                     std::swap(white, black);
                 }
                 play_game(game, white, black, true);
@@ -467,6 +474,18 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int game_index, const Engi
 
         SearchLimits limits;
         limits.max_depth = cfg.max_depth;
+        if (config_.verbose) {
+            int move_number = ply / 2 + 1;
+            std::ostringstream search_msg;
+            search_msg << "[Game " << (game_index + 1) << "] Searching " << move_number
+                       << (board.side_to_move() == Color::White ? ". " : "... ")
+                       << (board.side_to_move() == Color::White ? white.name : black.name)
+                       << " at depth " << cfg.max_depth;
+            if (cfg.threads > 1) {
+                search_msg << " (threads " << cfg.threads << ')';
+            }
+            log_verbose(search_msg.str());
+        }
         SearchResult search_result = current_search.search(board, limits);
         Move best = search_result.best_move;
         if (is_null_move(best)) {
@@ -650,8 +669,11 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
             }
             parameters_.save(output_path.string());
             set_global_network_path(output_path.string());
-            config_.white.network_path = output_path.string();
-            config_.black.network_path = output_path.string();
+            {
+                std::lock_guard<std::mutex> config_lock(config_mutex_);
+                config_.white.network_path = output_path.string();
+                config_.black.network_path = output_path.string();
+            }
 
           
             updated_network_path = output_path.string();
