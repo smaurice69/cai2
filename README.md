@@ -131,6 +131,8 @@ Key options:
 * `--training-rate RATE` – Learning rate for the internal trainer.
 * `--training-output PATH` – Where to store the continually updated NNUE weights.
 * `--training-history DIR` – Optional directory for archiving per-step snapshots.
+
+
 * `--verbose` – Print per-move search telemetry and training updates during self-play.
 
 Training batches are accumulated from every game (start position plus subsequent FENs). When the buffer exceeds the requested batch size, the trainer performs an optimisation step, saves the updated network, and reloads it for subsequent games.
