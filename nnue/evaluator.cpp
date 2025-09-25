@@ -12,7 +12,9 @@ namespace chiron::nnue {
 Evaluator::Evaluator() = default;
 
 void Evaluator::set_network_path(std::string path) {
-    std::scoped_lock lock(load_mutex_);
+
+    std::scoped_lock guard(load_mutex_);
+
     network_path_ = std::move(path);
     network_loaded_.store(false, std::memory_order_relaxed);
 }
@@ -21,12 +23,10 @@ void Evaluator::ensure_network_loaded() const {
     if (network_loaded_.load(std::memory_order_acquire)) {
         return;
     }
-    std::scoped_lock lock(load_mutex_);
+
+    std::scoped_lock guard(load_mutex_);
     if (network_loaded_.load(std::memory_order_acquire)) {
-        return;
-    }
-    std::scoped_lock lock(load_mutex_);
-    if (network_loaded_) {
+
         return;
     }
     try {
