@@ -104,6 +104,8 @@ The summary reports the SPRT conclusion, win/draw statistics, and the estimated 
 
 ## Self-Play and Training
 
+> Looking for a complete walkthrough? See [TRAINING_GUIDE.md](TRAINING_GUIDE.md) for an end-to-end recipe that covers data generation, training loops, and Elo evaluation.
+
 Launch concurrent self-play with optional training:
 
 ```bash
@@ -129,6 +131,7 @@ Key options:
 * `--training-rate RATE` – Learning rate for the internal trainer.
 * `--training-output PATH` – Where to store the continually updated NNUE weights.
 * `--training-history DIR` – Optional directory for archiving per-step snapshots.
+
 
 * `--verbose` – Print per-move search telemetry and training updates during self-play.
 

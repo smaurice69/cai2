@@ -87,8 +87,7 @@ class SelfPlayOrchestrator {
     std::string training_history_extension_;
     std::size_t total_positions_collected_ = 0;
     std::size_t total_positions_trained_ = 0;
-
-
+  
     int detect_existing_history_iteration() const;
 };
 
