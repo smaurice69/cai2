@@ -376,9 +376,16 @@ void SelfPlayOrchestrator::run() {
                 if (game >= total_games) {
                     break;
                 }
-                EngineConfig white = config_.white;
-                EngineConfig black = config_.black;
-                if (config_.alternate_colors && (game % 2 == 1)) {
+                EngineConfig white;
+                EngineConfig black;
+                bool alternate_colors = false;
+                {
+                    std::lock_guard<std::mutex> config_lock(config_mutex_);
+                    white = config_.white;
+                    black = config_.black;
+                    alternate_colors = config_.alternate_colors;
+                }
+                if (alternate_colors && (game % 2 == 1)) {
                     std::swap(white, black);
                 }
                 play_game(game, white, black, true);
@@ -467,7 +474,51 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int game_index, const Engi
 
         SearchLimits limits;
         limits.max_depth = cfg.max_depth;
-        SearchResult search_result = current_search.search(board, limits);
+        if (config_.verbose) {
+            int move_number = ply / 2 + 1;
+            std::ostringstream search_msg;
+            search_msg << "[Game " << (game_index + 1) << "] Searching " << move_number
+                       << (board.side_to_move() == Color::White ? ". " : "... ")
+                       << (board.side_to_move() == Color::White ? white.name : black.name)
+                       << " at depth " << cfg.max_depth;
+            if (cfg.threads > 1) {
+                search_msg << " (threads " << cfg.threads << ')';
+            }
+            log_verbose(search_msg.str());
+        }
+        std::atomic<bool> stop_flag{false};
+        InfoCallback info_cb;
+        if (config_.verbose) {
+            Color mover = board.side_to_move();
+            info_cb = [this, game_index, mover, &board](const SearchResult& info) {
+                std::ostringstream info_msg;
+                info_msg << "[Game " << (game_index + 1) << "] info depth " << info.depth;
+                info_msg << " | eval " << format_evaluation(info.score, mover);
+                info_msg << " | nodes " << static_cast<unsigned long long>(info.nodes);
+                if (info.elapsed.count() > 0) {
+                    double elapsed_ms = static_cast<double>(info.elapsed.count());
+                    info_msg << " | time " << static_cast<long long>(info.elapsed.count()) << "ms";
+                    if (elapsed_ms > 0.0) {
+                        double nodes_per_second = static_cast<double>(info.nodes) * 1000.0 / elapsed_ms;
+                        if (nodes_per_second > 0.0) {
+                            info_msg << " | nps " << static_cast<unsigned long long>(nodes_per_second);
+                        }
+                    }
+                }
+                Board pv_board = board;
+                std::string pv_line = format_pv(pv_board, info.pv);
+                if (!pv_line.empty()) {
+                    info_msg << " | pv " << pv_line;
+                }
+                log_verbose(info_msg.str());
+            };
+        }
+        SearchResult search_result;
+        if (info_cb) {
+            search_result = current_search.search(board, limits, stop_flag, info_cb);
+        } else {
+            search_result = current_search.search(board, limits);
+        }
         Move best = search_result.best_move;
         if (is_null_move(best)) {
             bool in_check = board.in_check(board.side_to_move());
@@ -650,8 +701,11 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
             }
             parameters_.save(output_path.string());
             set_global_network_path(output_path.string());
-            config_.white.network_path = output_path.string();
-            config_.black.network_path = output_path.string();
+            {
+                std::lock_guard<std::mutex> config_lock(config_mutex_);
+                config_.white.network_path = output_path.string();
+                config_.black.network_path = output_path.string();
+            }
 
           
             updated_network_path = output_path.string();

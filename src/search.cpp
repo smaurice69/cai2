@@ -197,20 +197,35 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
             if (stop_flag.load()) {
                 break;
             }
+
+            bool widened = false;
             if (score <= alpha) {
+                if (alpha <= -kInfinity) {
+                    completed_window = true;
+                    break;
+                }
                 alpha = std::max(-kInfinity, alpha - aspiration);
-                aspiration *= 2;
+                widened = true;
             } else if (score >= beta) {
+                if (beta >= kInfinity) {
+                    completed_window = true;
+                    break;
+                }
                 beta = std::min(kInfinity, beta + aspiration);
-                aspiration *= 2;
+                widened = true;
             } else {
                 completed_window = true;
                 break;
             }
-            if (aspiration > kInfinity / 2) {
-                alpha = -kInfinity;
-                beta = kInfinity;
+
+            if (widened) {
+                aspiration = std::min(aspiration * 2, kInfinity);
+                if (aspiration > kInfinity / 2) {
+                    alpha = -kInfinity;
+                    beta = kInfinity;
+                }
             }
+
             if (should_stop()) {
                 break;
             }

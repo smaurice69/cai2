@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "bitboard.h"
+#include "nnue/evaluator.h"
 
 namespace chiron {
 
@@ -38,6 +39,7 @@ int evaluate_with_network(const Board& board, const nnue::Network& network) {
     int32_t raw = white_sum - black_sum + network.bias();
     double scaled = static_cast<double>(raw) * static_cast<double>(network.scale());
     int eval = static_cast<int>(std::llround(scaled));
+    eval = std::clamp(eval, -nnue::kMaxEvaluationMagnitude, nnue::kMaxEvaluationMagnitude);
     return board.side_to_move() == Color::White ? eval : -eval;
 }
 

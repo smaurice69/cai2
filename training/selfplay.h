@@ -79,6 +79,7 @@ class SelfPlayOrchestrator {
     bool streams_open_ = false;
     std::mutex log_mutex_;
     std::mutex training_mutex_;
+    mutable std::mutex config_mutex_;
     Trainer trainer_;
     ParameterSet parameters_;
     std::vector<TrainingExample> training_buffer_;
