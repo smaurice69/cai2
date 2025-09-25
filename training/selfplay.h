@@ -31,6 +31,7 @@ struct SelfPlayConfig {
     bool capture_results = true;
     bool capture_pgn = true;
     bool record_fens = false;
+    bool verbose = false;
     std::string results_log = "selfplay_results.jsonl";
     std::string pgn_path = "selfplay_games.pgn";
     bool append_logs = true;
@@ -39,7 +40,8 @@ struct SelfPlayConfig {
     bool enable_training = false;
     std::size_t training_batch_size = 256;
     double training_learning_rate = 0.05;
-    std::string training_output_path = "trained.nnue";
+    std::string training_output_path = "nnue/models/chiron-selfplay-latest.nnue";
+    std::string training_history_dir = "nnue/models/history";
 };
 
 struct SelfPlayResult {
@@ -68,6 +70,7 @@ class SelfPlayOrchestrator {
     void write_pgn(int game_index, const SelfPlayResult& result);
     void ensure_streams();
     void handle_training(const SelfPlayResult& result);
+    void log_verbose(const std::string& message);
 
     SelfPlayConfig config_;
     std::mt19937 rng_;
@@ -79,6 +82,13 @@ class SelfPlayOrchestrator {
     Trainer trainer_;
     ParameterSet parameters_;
     std::vector<TrainingExample> training_buffer_;
+    int training_iteration_ = 0;
+    std::string training_history_prefix_;
+    std::string training_history_extension_;
+    std::size_t total_positions_collected_ = 0;
+    std::size_t total_positions_trained_ = 0;
+
+    int detect_existing_history_iteration() const;
 };
 
 }  // namespace chiron

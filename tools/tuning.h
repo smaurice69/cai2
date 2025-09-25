@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "tools/time_manager.h"
@@ -26,6 +27,8 @@ struct SprtSummary {
     int candidate_wins = 0;
     int baseline_wins = 0;
     int draws = 0;
+    std::optional<double> elo;
+    std::optional<double> elo_confidence;
 };
 
 class SprtTester {
