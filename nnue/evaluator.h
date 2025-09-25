@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,7 +43,7 @@ class Evaluator {
 
     std::string network_path_;
     mutable Network network_{};
-    mutable bool network_loaded_ = false;
+    mutable std::atomic<bool> network_loaded_{false};
     mutable std::mutex load_mutex_;
 };
 

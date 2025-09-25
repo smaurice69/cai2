@@ -14,11 +14,15 @@ Evaluator::Evaluator() = default;
 void Evaluator::set_network_path(std::string path) {
     std::scoped_lock lock(load_mutex_);
     network_path_ = std::move(path);
-    network_loaded_ = false;
+    network_loaded_.store(false, std::memory_order_relaxed);
 }
 
 void Evaluator::ensure_network_loaded() const {
-    if (network_loaded_) {
+    if (network_loaded_.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::scoped_lock lock(load_mutex_);
+    if (network_loaded_.load(std::memory_order_acquire)) {
         return;
     }
     std::scoped_lock lock(load_mutex_);
@@ -35,7 +39,7 @@ void Evaluator::ensure_network_loaded() const {
         std::cerr << "info string NNUE fallback: " << ex.what() << std::endl;
         network_.load_default();
     }
-    network_loaded_ = true;
+    network_loaded_.store(true, std::memory_order_release);
 }
 
 void Evaluator::apply_feature(Accumulator& accum, Color color, PieceType piece, int square, int sign) const {
