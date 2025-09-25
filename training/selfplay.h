@@ -32,6 +32,7 @@ struct SelfPlayConfig {
     bool capture_pgn = true;
     bool record_fens = false;
     bool verbose = false;
+    bool verbose_lite = false;
     std::string results_log = "selfplay_results.jsonl";
     std::string pgn_path = "selfplay_games.pgn";
     bool append_logs = true;
@@ -42,6 +43,7 @@ struct SelfPlayConfig {
     double training_learning_rate = 0.05;
     std::string training_output_path = "nnue/models/chiron-selfplay-latest.nnue";
     std::string training_history_dir = "nnue/models/history";
+    std::size_t training_hidden_size = nnue::kDefaultHiddenSize;
 };
 
 struct SelfPlayResult {
@@ -71,6 +73,7 @@ class SelfPlayOrchestrator {
     void ensure_streams();
     void handle_training(const SelfPlayResult& result);
     void log_verbose(const std::string& message);
+    void log_lite(const std::string& message);
 
     SelfPlayConfig config_;
     std::mt19937 rng_;

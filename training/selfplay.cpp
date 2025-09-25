@@ -268,7 +268,8 @@ std::string format_pv(Board board, const std::vector<Move>& pv) {
 SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
     : config_(std::move(config)),
       rng_(config_.seed != 0U ? config_.seed : static_cast<unsigned int>(std::random_device{}())),
-      trainer_(Trainer::Config{config_.training_learning_rate, 0.0005}) {
+      trainer_(Trainer::Config{config_.training_learning_rate, 0.0005}),
+      parameters_(config_.training_hidden_size) {
     if (!config_.training_output_path.empty()) {
         std::filesystem::path output_path(config_.training_output_path);
         training_history_prefix_ = output_path.stem().string();
@@ -285,6 +286,7 @@ SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
         config_.record_fens = true;
         if (!config_.training_output_path.empty() && std::filesystem::exists(config_.training_output_path)) {
             parameters_.load(config_.training_output_path);
+            config_.training_hidden_size = parameters_.network().hidden_size();
             set_global_network_path(config_.training_output_path);
         }
         training_buffer_.reserve(config_.training_batch_size);
@@ -430,6 +432,19 @@ SelfPlayResult SelfPlayOrchestrator::play_game(int game_index, const EngineConfi
                     << ", trained " << total_positions_trained_ << ")";
         }
         log_verbose(summary.str());
+    } else if (config_.verbose_lite) {
+        std::ostringstream summary;
+        summary << "Game " << (game_index + 1) << " complete: ";
+        if (result.result == "1-0") {
+            summary << result.white_player << " wins as White";
+        } else if (result.result == "0-1") {
+            summary << result.black_player << " wins as Black";
+        } else {
+            summary << "Drawn game";
+        }
+        summary << " (" << result.termination << ", " << std::fixed << std::setprecision(2)
+                << (result.duration_ms / 1000.0) << "s)";
+        log_lite(summary.str());
     }
     return result;
 }
@@ -748,10 +763,14 @@ void SelfPlayOrchestrator::log_verbose(const std::string& message) {
     if (!config_.verbose) {
         return;
     }
+    log_lite(message);
+}
+
+void SelfPlayOrchestrator::log_lite(const std::string& message) {
     std::lock_guard<std::mutex> lock(log_mutex_);
     std::cout << message << std::endl;
 
-  
+
 }
 
 int SelfPlayOrchestrator::detect_existing_history_iteration() const {

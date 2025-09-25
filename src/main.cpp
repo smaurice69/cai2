@@ -30,6 +30,7 @@ using chiron::TrainingExample;
 using chiron::load_training_file;
 using chiron::perft;
 using chiron::save_training_file;
+using chiron::nnue::kDefaultHiddenSize;
 
 int parse_int(const std::vector<std::string>& args, std::size_t& index, const std::string& option) {
     if (index + 1 >= args.size()) {
@@ -122,6 +123,8 @@ int run_selfplay(const std::vector<std::string>& args) {
             config.record_fens = true;
         } else if (opt == "--verbose") {
             config.verbose = true;
+        } else if (opt == "--verboselite") {
+            config.verbose_lite = true;
         } else if (opt == "--max-ply") {
             config.max_ply = parse_int(args, i, opt);
         } else if (opt == "--seed") {
@@ -173,6 +176,8 @@ int run_selfplay(const std::vector<std::string>& args) {
         } else if (opt == "--training-history") {
             if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
             config.training_history_dir = args[++i];
+        } else if (opt == "--training-hidden") {
+            config.training_hidden_size = parse_size(args, i, opt);
         } else {
             throw std::invalid_argument("Unknown selfplay option: " + opt);
         }
@@ -310,6 +315,7 @@ int run_train_command(const std::vector<std::string>& args) {
     std::string output_path = "trained.nnue";
     double learning_rate = 0.05;
     std::size_t batch_size = 256;
+    std::size_t hidden_size = kDefaultHiddenSize;
     int iterations = 1;
     bool shuffle = false;
 
@@ -329,6 +335,8 @@ int run_train_command(const std::vector<std::string>& args) {
             iterations = parse_int(args, i, opt);
         } else if (opt == "--shuffle") {
             shuffle = true;
+        } else if (opt == "--hidden") {
+            hidden_size = parse_size(args, i, opt);
         }
     }
 
@@ -346,7 +354,7 @@ int run_train_command(const std::vector<std::string>& args) {
         std::shuffle(data.begin(), data.end(), rng);
     }
 
-    ParameterSet parameters;
+    ParameterSet parameters(hidden_size);
     if (!output_path.empty() && std::filesystem::exists(output_path)) {
         parameters.load(output_path);
     }

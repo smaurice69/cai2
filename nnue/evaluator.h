@@ -1,10 +1,10 @@
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "board.h"
 #include "move.h"
@@ -19,9 +19,13 @@ constexpr int kMaxEvaluationMagnitude = 30000;
  * @brief Accumulator storing the summed NNUE feature contributions for both colors.
  */
 struct Accumulator {
-    std::array<int32_t, kNumColors> material{};
+    std::vector<int32_t> white;
+    std::vector<int32_t> black;
 
-    void reset() { material.fill(0); }
+    void reset(std::size_t hidden_size) {
+        white.assign(hidden_size, 0);
+        black.assign(hidden_size, 0);
+    }
 };
 
 /**

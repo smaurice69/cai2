@@ -29,9 +29,9 @@ Chiron ships with a lightweight NNUE evaluator. To bootstrap training:
      --training-history nnue/models/history \
      --results logs/results.jsonl \
      --pgn logs/selfplay.pgn \
-     --verbose
+     --verboselite
    ```
-2. The orchestrator automatically streams search telemetry (with `--verbose`), saves the continually updated network to `nnue/models/chiron-selfplay-latest.nnue`, and writes snapshot checkpoints to `nnue/models/history/` every optimisation step. This ensures each training run builds on the previous weights instead of starting from scratch.
+2. The orchestrator automatically streams search telemetry (with `--verbose`), saves the continually updated network to `nnue/models/chiron-selfplay-latest.nnue`, and writes snapshot checkpoints to `nnue/models/history/` every optimisation step. This ensures each training run builds on the previous weights instead of starting from scratch. Swap `--verboselite` for `--verbose` if you only need to know when games finish without the detailed move trace.
 
 ## 3. Grow the Training Dataset
 
@@ -63,7 +63,7 @@ Chiron ships with a lightweight NNUE evaluator. To bootstrap training:
      --rate 0.03 \
      --shuffle
    ```
-3. Replace the runtime network by pointing self-play or the UCI option to the freshly trained weights:
+3. Replace the runtime network by pointing self-play or the UCI option to the freshly trained weights. Pass `--training-hidden <SIZE>` during self-play (or `--hidden <SIZE>` to the offline `train` command) to start from a wider NNUE with more hidden neurons when you want additional model capacity.
    ```bash
    ./build/chiron selfplay --enable-training --training-output nnue/models/offline-latest.nnue
    ```

@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include "bitboard.h"
 #include "nnue/evaluator.h"
@@ -20,24 +21,35 @@ int clamp_weight(int value) {
 }
 
 int evaluate_with_network(const Board& board, const nnue::Network& network) {
-    int32_t white_sum = 0;
-    int32_t black_sum = 0;
+    std::size_t hidden = network.hidden_size();
+    std::vector<int32_t> white(hidden, 0);
+    std::vector<int32_t> black(hidden, 0);
     for (int color = 0; color < kNumColors; ++color) {
         for (int piece = 0; piece < kNumPieceTypes; ++piece) {
             Bitboard bb = board.pieces(static_cast<Color>(color), static_cast<PieceType>(piece));
             while (bb) {
                 int sq = pop_lsb(bb);
-                int32_t weight = network.weight(static_cast<Color>(color), static_cast<PieceType>(piece), sq);
-                if (color == static_cast<int>(Color::White)) {
-                    white_sum += weight;
-                } else {
-                    black_sum += weight;
+                std::size_t feature = nnue::feature_index(static_cast<Color>(color), static_cast<PieceType>(piece), sq);
+                for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+                    int32_t weight = network.input_weight(feature, neuron);
+                    if (color == static_cast<int>(Color::White)) {
+                        white[neuron] += weight;
+                    } else {
+                        black[neuron] += weight;
+                    }
                 }
             }
         }
     }
-    int32_t raw = white_sum - black_sum + network.bias();
-    double scaled = static_cast<double>(raw) * static_cast<double>(network.scale());
+
+    double raw = static_cast<double>(network.bias());
+    for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+        int32_t pre = white[neuron] - black[neuron] + network.hidden_bias(neuron);
+        double normalized = static_cast<double>(pre) / nnue::kActivationScale;
+        double activation = std::tanh(normalized) * nnue::kActivationScale;
+        raw += activation * static_cast<double>(network.output_weight(neuron));
+    }
+    double scaled = raw * static_cast<double>(network.scale());
     int eval = static_cast<int>(std::llround(scaled));
     eval = std::clamp(eval, -nnue::kMaxEvaluationMagnitude, nnue::kMaxEvaluationMagnitude);
     return board.side_to_move() == Color::White ? eval : -eval;
@@ -45,7 +57,9 @@ int evaluate_with_network(const Board& board, const nnue::Network& network) {
 
 }  // namespace
 
-ParameterSet::ParameterSet() { network_.load_default(); }
+ParameterSet::ParameterSet(std::size_t hidden_size) { network_.load_default(hidden_size); }
+
+void ParameterSet::reset(std::size_t hidden_size) { network_.load_default(hidden_size); }
 
 void ParameterSet::load(const std::string& path) { network_.load_from_file(path); }
 
@@ -66,38 +80,112 @@ void Trainer::train_batch(const std::vector<TrainingExample>& batch, ParameterSe
         return;
     }
 
+    nnue::Network& net = parameters.network();
+    std::size_t hidden = net.hidden_size();
+    std::vector<std::size_t> white_features;
+    std::vector<std::size_t> black_features;
+    white_features.reserve(32);
+    black_features.reserve(32);
+    std::vector<int32_t> white_accum(hidden);
+    std::vector<int32_t> black_accum(hidden);
+    std::vector<double> activations(hidden);
+    std::vector<double> activation_derivatives(hidden);
+
     for (const TrainingExample& example : batch) {
         Board board;
         board.set_from_fen(example.fen);
 
-        nnue::Network& net = parameters.network();
-        int prediction = evaluate_with_network(board, net);
-        int error = example.target_cp - prediction;
-        double gradient = config_.learning_rate * static_cast<double>(error);
-
+        white_features.clear();
+        black_features.clear();
         for (int color = 0; color < kNumColors; ++color) {
             for (int piece = 0; piece < kNumPieceTypes; ++piece) {
                 Bitboard bb = board.pieces(static_cast<Color>(color), static_cast<PieceType>(piece));
                 while (bb) {
                     int square = pop_lsb(bb);
-                    int sign = (color == static_cast<int>(Color::White)) ? 1 : -1;
-                    int32_t current = net.weight(static_cast<Color>(color), static_cast<PieceType>(piece), square);
-                    double update = gradient * sign;
-                    if (config_.regularisation > 0.0) {
-                        update -= config_.regularisation * static_cast<double>(current);
+                    std::size_t feature = nnue::feature_index(static_cast<Color>(color), static_cast<PieceType>(piece), square);
+                    if (color == static_cast<int>(Color::White)) {
+                        white_features.push_back(feature);
+                    } else {
+                        black_features.push_back(feature);
                     }
-                    int32_t next = clamp_weight(static_cast<int>(std::llround(static_cast<double>(current) + update)));
-                    net.set_weight(static_cast<Color>(color), static_cast<PieceType>(piece), square, next);
                 }
             }
         }
 
-        int32_t bias = net.bias();
-        double bias_update = gradient;
-        if (config_.regularisation > 0.0) {
-            bias_update -= config_.regularisation * static_cast<double>(bias);
+        std::fill(white_accum.begin(), white_accum.end(), 0);
+        std::fill(black_accum.begin(), black_accum.end(), 0);
+        for (std::size_t feature : white_features) {
+            for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+                white_accum[neuron] += net.input_weight(feature, neuron);
+            }
         }
-        net.set_bias(clamp_weight(static_cast<int>(std::llround(static_cast<double>(bias) + bias_update))));
+        for (std::size_t feature : black_features) {
+            for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+                black_accum[neuron] += net.input_weight(feature, neuron);
+            }
+        }
+
+        double raw = static_cast<double>(net.bias());
+        for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+            int32_t pre = white_accum[neuron] - black_accum[neuron] + net.hidden_bias(neuron);
+            double normalized = static_cast<double>(pre) / nnue::kActivationScale;
+            double tanh_val = std::tanh(normalized);
+            activations[neuron] = tanh_val * nnue::kActivationScale;
+            activation_derivatives[neuron] = 1.0 - tanh_val * tanh_val;
+            raw += activations[neuron] * static_cast<double>(net.output_weight(neuron));
+        }
+
+        double orientation = (board.side_to_move() == Color::White) ? 1.0 : -1.0;
+        double predicted_cp = orientation * raw * static_cast<double>(net.scale());
+        double error = static_cast<double>(example.target_cp) - predicted_cp;
+        double lr_error = config_.learning_rate * error * orientation * static_cast<double>(net.scale());
+
+        double bias_current = static_cast<double>(net.bias());
+        double bias_next = bias_current + lr_error;
+        if (config_.regularisation > 0.0) {
+            bias_next -= config_.regularisation * bias_current;
+        }
+        net.set_bias(clamp_weight(static_cast<int>(std::llround(bias_next))));
+
+        for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+            double output_current = static_cast<double>(net.output_weight(neuron));
+            double output_next = output_current + lr_error * activations[neuron];
+            if (config_.regularisation > 0.0) {
+                output_next -= config_.regularisation * output_current;
+            }
+            net.set_output_weight(neuron, static_cast<float>(output_next));
+
+            double grad_pre = lr_error * output_current * activation_derivatives[neuron];
+            int32_t hidden_bias_current = net.hidden_bias(neuron);
+            double hidden_next = static_cast<double>(hidden_bias_current) + grad_pre;
+            if (config_.regularisation > 0.0) {
+                hidden_next -= config_.regularisation * static_cast<double>(hidden_bias_current);
+            }
+            net.set_hidden_bias(neuron, clamp_weight(static_cast<int>(std::llround(hidden_next))));
+
+            if (std::abs(grad_pre) < 1e-12) {
+                continue;
+            }
+
+            for (std::size_t feature : white_features) {
+                int32_t current = net.input_weight(feature, neuron);
+                double next = static_cast<double>(current) + grad_pre;
+                if (config_.regularisation > 0.0) {
+                    next -= config_.regularisation * static_cast<double>(current);
+                }
+                net.set_input_weight(feature, neuron,
+                                     clamp_weight(static_cast<int>(std::llround(next))));
+            }
+            for (std::size_t feature : black_features) {
+                int32_t current = net.input_weight(feature, neuron);
+                double next = static_cast<double>(current) - grad_pre;
+                if (config_.regularisation > 0.0) {
+                    next -= config_.regularisation * static_cast<double>(current);
+                }
+                net.set_input_weight(feature, neuron,
+                                     clamp_weight(static_cast<int>(std::llround(next))));
+            }
+        }
     }
 }
 

@@ -47,13 +47,25 @@ void Evaluator::apply_feature(Accumulator& accum, Color color, PieceType piece, 
         return;
     }
     const Network& net = network();
-    int32_t weight = net.weight(color, piece, square);
-    accum.material[static_cast<int>(color)] += sign * weight;
+    std::size_t hidden = net.hidden_size();
+    if (accum.white.size() != hidden || accum.black.size() != hidden) {
+        accum.reset(hidden);
+    }
+    std::size_t feature = feature_index(color, piece, square);
+    for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+        int32_t weight = net.input_weight(feature, neuron);
+        if (color == Color::White) {
+            accum.white[neuron] += sign * weight;
+        } else {
+            accum.black[neuron] += sign * weight;
+        }
+    }
 }
 
 void Evaluator::build_accumulator(const Board& board, Accumulator& accum) const {
     ensure_network_loaded();
-    accum.reset();
+    const Network& net = network();
+    accum.reset(net.hidden_size());
     for (int color = 0; color < kNumColors; ++color) {
         for (int piece = 0; piece < kNumPieceTypes; ++piece) {
             Bitboard bb = board.pieces(static_cast<Color>(color), static_cast<PieceType>(piece));
@@ -111,10 +123,23 @@ void Evaluator::update_accumulator(const Board& board, const Move& move, const A
 
 int Evaluator::evaluate(const Board& board, const Accumulator& accum) const {
     ensure_network_loaded();
-    int32_t white_sum = accum.material[static_cast<int>(Color::White)];
-    int32_t black_sum = accum.material[static_cast<int>(Color::Black)];
-    int32_t raw = white_sum - black_sum + network_.bias();
-    double scaled = static_cast<double>(raw) * static_cast<double>(network_.scale());
+    const Network& net = network();
+    std::size_t hidden = net.hidden_size();
+    double raw = static_cast<double>(net.bias());
+    for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+        int32_t pre = 0;
+        if (neuron < accum.white.size()) {
+            pre += accum.white[neuron];
+        }
+        if (neuron < accum.black.size()) {
+            pre -= accum.black[neuron];
+        }
+        pre += net.hidden_bias(neuron);
+        double normalized = static_cast<double>(pre) / kActivationScale;
+        double activation = std::tanh(normalized) * kActivationScale;
+        raw += activation * static_cast<double>(net.output_weight(neuron));
+    }
+    double scaled = raw * static_cast<double>(net.scale());
     int score = static_cast<int>(std::llround(scaled));
     score = std::clamp(score, -kMaxEvaluationMagnitude, kMaxEvaluationMagnitude);
     return board.side_to_move() == Color::White ? score : -score;
