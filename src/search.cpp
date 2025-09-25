@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <shared_mutex>
+#include <thread>
 #include <tuple>
 
 #include "evaluation.h"
@@ -66,9 +70,9 @@ Search::Search(std::size_t table_size, std::shared_ptr<nnue::Evaluator> evaluato
     if (!evaluator_) {
         evaluator_ = global_evaluator();
     }
-    accumulator_stack_.resize(256);
-    stack_.resize(256);
-    killer_moves_.resize(256);
+    contexts_.resize(1);
+    ensure_context_capacity(contexts_.front(), 128);
+    reset_context(contexts_.front());
     clear();
 }
 
@@ -85,6 +89,7 @@ void Search::set_table_size(std::size_t entries) {
     if (entries == 0) {
         entries = 1ULL;
     }
+    std::unique_lock lock(tt_mutex_);
     table_.assign(entries, {});
     generation_ = 0;
 }
@@ -98,16 +103,22 @@ void Search::set_table_size_mb(std::size_t megabytes) {
     set_table_size(entries);
 }
 
-void Search::set_threads(int threads) { thread_count_ = std::max(1, threads); }
+void Search::set_threads(int threads) {
+    thread_count_ = std::max(1, threads);
+    contexts_.resize(static_cast<std::size_t>(thread_count_));
+    for (auto& ctx : contexts_) {
+        ensure_context_capacity(ctx, 128);
+        reset_context(ctx);
+    }
+}
 
 void Search::clear() {
     for (auto& entry : table_) {
         entry = TTEntry{};
     }
-    std::memset(history_, 0, sizeof(history_));
-    for (auto& killers : killer_moves_) {
-        killers[0] = Move{};
-        killers[1] = Move{};
+    generation_ = 0;
+    for (auto& ctx : contexts_) {
+        reset_context(ctx);
     }
 }
 
@@ -133,26 +144,27 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
     node_limit_ = limits.node_limit;
     start_time_ = std::chrono::steady_clock::now();
     time_limit_ = limits.infinite ? std::chrono::milliseconds::zero() : compute_time_budget(board, limits);
-    nodes_ = 0;
-    seldepth_ = 0;
+    nodes_total_.store(0, std::memory_order_relaxed);
+    seldepth_total_.store(0, std::memory_order_relaxed);
     generation_ = (generation_ + 1) & 0xFFU;
 
     int max_depth = std::clamp(limits.max_depth, 1, 128);
-    if (static_cast<int>(accumulator_stack_.size()) < max_depth + 5) {
-        accumulator_stack_.resize(static_cast<std::size_t>(max_depth) + 5);
-    }
-    if (static_cast<int>(stack_.size()) < max_depth + 5) {
-        stack_.resize(static_cast<std::size_t>(max_depth) + 5);
-    }
-    if (static_cast<int>(killer_moves_.size()) < max_depth + 5) {
-        killer_moves_.resize(static_cast<std::size_t>(max_depth) + 5);
+    for (auto& ctx : contexts_) {
+        ensure_context_capacity(ctx, max_depth);
+        ctx.repetition_stack.clear();
+        ctx.repetition_stack.reserve(512);
+        std::fill(ctx.killer_moves.begin(), ctx.killer_moves.end(), std::array<Move, 2>{});
+        std::memset(ctx.history, 0, sizeof(ctx.history));
     }
 
-    repetition_stack_.clear();
-    repetition_stack_.reserve(512);
-    repetition_stack_.push_back(board.zobrist_key());
+    ThreadContext& main_ctx = contexts_.front();
+    main_ctx.repetition_stack.push_back(board.zobrist_key());
 
-    evaluator_->build_accumulator(board, accumulator_stack_[0]);
+    evaluator_->build_accumulator(board, main_ctx.accumulator_stack[0]);
+    for (std::size_t i = 1; i < contexts_.size(); ++i) {
+        contexts_[i].accumulator_stack[0] = main_ctx.accumulator_stack[0];
+        contexts_[i].repetition_stack.push_back(board.zobrist_key());
+    }
 
     SearchResult best{};
     Move last_best{};
@@ -164,13 +176,24 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
             break;
         }
 
+        for (auto& ctx : contexts_) {
+            if (ctx.repetition_stack.empty()) {
+                ctx.repetition_stack.push_back(board.zobrist_key());
+            } else {
+                ctx.repetition_stack[0] = board.zobrist_key();
+            }
+            ctx.repetition_stack.resize(1);
+            ctx.accumulator_stack[0] = main_ctx.accumulator_stack[0];
+        }
+
         int alpha = std::max(-kInfinity, previous_score - aspiration);
         int beta = std::min(kInfinity, previous_score + aspiration);
         int score = 0;
         bool completed_window = false;
 
+        Move iteration_best{};
         while (true) {
-            score = search_root(board, depth, alpha, beta);
+            score = search_root(main_ctx, board, depth, alpha, beta, iteration_best);
             if (stop_flag.load()) {
                 break;
             }
@@ -206,13 +229,16 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
 
         best.depth = depth;
         best.score = score;
-        best.nodes = nodes_;
-        best.seldepth = seldepth_;
+        best.nodes = nodes_total_.load(std::memory_order_relaxed);
+        best.seldepth = seldepth_total_.load(std::memory_order_relaxed);
         best.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time_);
         best.pv = extract_pv(board);
         if (!best.pv.empty()) {
             best.best_move = best.pv.front();
             last_best = best.best_move;
+        } else if (iteration_best.from != 0 || iteration_best.to != 0) {
+            best.best_move = iteration_best;
+            last_best = iteration_best;
         } else if (last_best.from != 0 || last_best.to != 0) {
             best.best_move = last_best;
         }
@@ -224,7 +250,7 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
         if (std::abs(score) > kMateScoreThreshold) {
             break;
         }
-        if (node_limit_ && nodes_ >= node_limit_) {
+        if (node_limit_ && nodes_total_.load(std::memory_order_relaxed) >= node_limit_) {
             break;
         }
     }
@@ -240,7 +266,7 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
     return best;
 }
 
-int Search::search_root(Board& board, int depth, int alpha, int beta) {
+int Search::search_root(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, Move& best_move) {
     TTEntry tt_entry;
     Move hash_move{};
     if (probe_tt(board.zobrist_key(), 0, tt_entry)) {
@@ -252,6 +278,7 @@ int Search::search_root(Board& board, int depth, int alpha, int beta) {
         if (board.in_check(board.side_to_move())) {
             return -kMateValue + 1;
         }
+        best_move = Move{};
         return 0;
     }
 
@@ -265,47 +292,83 @@ int Search::search_root(Board& board, int depth, int alpha, int beta) {
             lhs_score = mvv_lva(lhs, board);
             rhs_score = mvv_lva(rhs, board);
         } else {
-            lhs_score = history_score(lhs, board.side_to_move());
-            rhs_score = history_score(rhs, board.side_to_move());
+            lhs_score = history_score(ctx, lhs, board.side_to_move());
+            rhs_score = history_score(ctx, rhs, board.side_to_move());
         }
         return lhs_score > rhs_score;
     });
 
     int alpha_original = alpha;
     int best_score = -kInfinity;
-    Move best_move_local{};
+    best_move = Move{};
 
-    for (const Move& move : moves) {
-        if (should_stop()) {
-            break;
+    std::atomic<std::size_t> next_index{1};
+    std::atomic<int> shared_alpha{alpha};
+    std::atomic<bool> cutoff{alpha >= beta};
+    std::mutex best_mutex;
+    std::vector<std::thread> workers;
+
+    // Evaluate the first move on the calling thread to seed alpha with a good bound.
+    if (!moves.empty()) {
+        const Move& first = moves.front();
+        int value = search_root_worker(ctx, board, first, depth, alpha, beta);
+        best_score = value;
+        best_move = first;
+        alpha = std::max(alpha, value);
+        shared_alpha.store(alpha, std::memory_order_relaxed);
+        if (value >= beta) {
+            TTFlag flag = TTFlag::Beta;
+            store_tt(board.zobrist_key(), depth, best_score, best_move, static_cast<std::uint8_t>(flag), 0);
+            return best_score;
         }
+    }
 
-        Board::State state;
-        evaluator_->update_accumulator(board, move, accumulator_stack_[0], accumulator_stack_[1]);
-        board.make_move(move, state);
-        repetition_stack_.push_back(board.zobrist_key());
-
-        int value = -negamax(board, depth - 1, -beta, -alpha, true, 1);
-
-        repetition_stack_.pop_back();
-        board.undo_move(move, state);
-
-        if (stop_signal_ && stop_signal_->load()) {
-            return 0;
+    auto worker_fn = [&](int context_index) {
+        ThreadContext& worker_ctx = contexts_[static_cast<std::size_t>(context_index)];
+        while (true) {
+            if (cutoff.load(std::memory_order_relaxed) || should_stop()) {
+                break;
+            }
+            std::size_t idx = next_index.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= moves.size()) {
+                break;
+            }
+            int local_alpha = shared_alpha.load(std::memory_order_relaxed);
+            int value = search_root_worker(worker_ctx, board, moves[idx], depth, local_alpha, beta);
+            if (stop_signal_ && stop_signal_->load()) {
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(best_mutex);
+                if (value > best_score) {
+                    best_score = value;
+                    best_move = moves[idx];
+                }
+                int current_alpha = shared_alpha.load(std::memory_order_relaxed);
+                if (value > current_alpha) {
+                    shared_alpha.store(value, std::memory_order_relaxed);
+                }
+                if (value >= beta) {
+                    cutoff.store(true, std::memory_order_relaxed);
+                }
+            }
         }
+    };
 
-        if (value > best_score) {
-            best_score = value;
-            best_move_local = move;
-        }
+    for (int i = 1; i < thread_count_; ++i) {
+        workers.emplace_back(worker_fn, i);
+    }
 
-        if (value > alpha) {
-            alpha = value;
-        }
+    worker_fn(0);
 
-        if (alpha >= beta) {
-            break;
+    for (auto& thread : workers) {
+        if (thread.joinable()) {
+            thread.join();
         }
+    }
+
+    if (best_score == -kInfinity) {
+        best_score = alpha;
     }
 
     TTFlag flag = TTFlag::Exact;
@@ -314,29 +377,54 @@ int Search::search_root(Board& board, int depth, int alpha, int beta) {
     } else if (best_score >= beta) {
         flag = TTFlag::Beta;
     }
-    store_tt(board.zobrist_key(), depth, best_score, best_move_local, static_cast<std::uint8_t>(flag), 0);
+    store_tt(board.zobrist_key(), depth, best_score, best_move, static_cast<std::uint8_t>(flag), 0);
     return best_score;
 }
 
-int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_null, int ply) {
+int Search::search_root_worker(ThreadContext& ctx, Board& board, const Move& move, int depth, int alpha, int beta) {
     if (should_stop()) {
         return 0;
     }
 
-    seldepth_ = std::max(seldepth_, ply);
-    ++nodes_;
+    if (ctx.repetition_stack.empty()) {
+        ctx.repetition_stack.push_back(board.zobrist_key());
+    } else {
+        ctx.repetition_stack[0] = board.zobrist_key();
+    }
+    ctx.repetition_stack.resize(1);
+
+    evaluator_->update_accumulator(board, move, ctx.accumulator_stack[0], ctx.accumulator_stack[1]);
+
+    Board local_board = board;
+    Board::State state;
+    local_board.make_move(move, state);
+    ctx.repetition_stack.push_back(local_board.zobrist_key());
+
+    int value = -negamax(ctx, local_board, depth - 1, -beta, -alpha, true, 1);
+
+    ctx.repetition_stack.pop_back();
+    return value;
+}
+
+int Search::negamax(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, bool allow_null, int ply) {
+    if (should_stop()) {
+        return 0;
+    }
+
+    atomic_max(seldepth_total_, ply);
+    nodes_total_.fetch_add(1, std::memory_order_relaxed);
 
     bool in_check = board.in_check(board.side_to_move());
-    stack_[ply].in_check = in_check;
+    ctx.stack[ply].in_check = in_check;
 
     if (depth <= 0) {
-        return quiescence(board, alpha, beta, ply);
+        return quiescence(ctx, board, alpha, beta, ply);
     }
 
     if (board.halfmove_clock() >= 100) {
         return 0;
     }
-    if (std::count(repetition_stack_.begin(), repetition_stack_.end(), board.zobrist_key()) >= 3) {
+    if (std::count(ctx.repetition_stack.begin(), ctx.repetition_stack.end(), board.zobrist_key()) >= 3) {
         return 0;
     }
 
@@ -357,16 +445,16 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
         }
     }
 
-    int static_eval = evaluator_->evaluate(board, accumulator_stack_[ply]);
-    stack_[ply].static_eval = static_eval;
+    int static_eval = evaluator_->evaluate(board, ctx.accumulator_stack[ply]);
+    ctx.stack[ply].static_eval = static_eval;
     int alpha_original = alpha;
 
     if (!in_check && allow_null && depth >= 3 && static_eval >= beta) {
         Board::State state;
         board.make_null_move(state);
-        repetition_stack_.push_back(board.zobrist_key());
-        int null_score = -negamax(board, depth - 1 - kNullMoveReduction, -beta, -beta + 1, false, ply + 1);
-        repetition_stack_.pop_back();
+        ctx.repetition_stack.push_back(board.zobrist_key());
+        int null_score = -negamax(ctx, board, depth - 1 - kNullMoveReduction, -beta, -beta + 1, false, ply + 1);
+        ctx.repetition_stack.pop_back();
         board.undo_null_move(state);
         if (null_score >= beta) {
             return beta;
@@ -391,7 +479,7 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
             tier = 2;
             primary = mvv_lva(move, board);
         } else {
-            const auto& killers = killer_moves_[ply];
+            const auto& killers = ctx.killer_moves[ply];
             if (same_move(move, killers[0])) {
                 tier = 1;
                 primary = 2;
@@ -399,7 +487,7 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
                 tier = 1;
                 primary = 1;
             }
-            secondary = history_score(move, board.side_to_move());
+            secondary = history_score(ctx, move, board.side_to_move());
         }
         return std::make_tuple(tier, primary, secondary);
     };
@@ -414,9 +502,9 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
 
     for (const Move& move : moves) {
         Board::State state;
-        evaluator_->update_accumulator(board, move, accumulator_stack_[ply], accumulator_stack_[ply + 1]);
+        evaluator_->update_accumulator(board, move, ctx.accumulator_stack[ply], ctx.accumulator_stack[ply + 1]);
         board.make_move(move, state);
-        repetition_stack_.push_back(board.zobrist_key());
+        ctx.repetition_stack.push_back(board.zobrist_key());
 
         int new_depth = depth - 1;
         bool gives_check = board.in_check(board.side_to_move());
@@ -425,12 +513,12 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
         if (can_reduce) {
             int reduction = 1 + (move_index > 6);
             int reduced_depth = std::max(1, depth - 1 - reduction);
-            score = -negamax(board, reduced_depth, -alpha - 1, -alpha, true, ply + 1);
+            score = -negamax(ctx, board, reduced_depth, -alpha - 1, -alpha, true, ply + 1);
             if (score > alpha) {
-                score = -negamax(board, new_depth, -beta, -alpha, true, ply + 1);
+                score = -negamax(ctx, board, new_depth, -beta, -alpha, true, ply + 1);
             }
         } else {
-            score = -negamax(board, new_depth, -beta, -alpha, true, ply + 1);
+            score = -negamax(ctx, board, new_depth, -beta, -alpha, true, ply + 1);
         }
 
         if (score > best_score) {
@@ -441,19 +529,19 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
             alpha = score;
         }
 
-        repetition_stack_.pop_back();
+        ctx.repetition_stack.pop_back();
         board.undo_move(move, state);
 
         if (alpha >= beta) {
             if (!move.is_capture() && !move.is_promotion()) {
-                update_killers(killer_moves_[ply], move);
-                update_history(move, depth, board.side_to_move());
+                update_killers(ctx.killer_moves[ply], move);
+                update_history(ctx, move, depth, board.side_to_move());
             }
             break;
         }
 
         if (!move.is_capture() && !move.is_promotion() && alpha > static_eval) {
-            update_history(move, depth, board.side_to_move());
+            update_history(ctx, move, depth, board.side_to_move());
         }
 
         ++move_index;
@@ -473,19 +561,19 @@ int Search::negamax(Board& board, int depth, int alpha, int beta, bool allow_nul
     return best_score;
 }
 
-int Search::quiescence(Board& board, int alpha, int beta, int ply) {
+int Search::quiescence(ThreadContext& ctx, Board& board, int alpha, int beta, int ply) {
     if (should_stop()) {
         return 0;
     }
 
-    ++nodes_;
+    nodes_total_.fetch_add(1, std::memory_order_relaxed);
 
     bool in_check = board.in_check(board.side_to_move());
     if (in_check) {
-        return negamax(board, 1, alpha, beta, false, ply);
+        return negamax(ctx, board, 1, alpha, beta, false, ply);
     }
 
-    int stand_pat = evaluator_->evaluate(board, accumulator_stack_[ply]);
+    int stand_pat = evaluator_->evaluate(board, ctx.accumulator_stack[ply]);
     if (stand_pat >= beta) {
         return beta;
     }
@@ -508,11 +596,11 @@ int Search::quiescence(Board& board, int alpha, int beta, int ply) {
 
     for (const Move& move : captures) {
         Board::State state;
-        evaluator_->update_accumulator(board, move, accumulator_stack_[ply], accumulator_stack_[ply + 1]);
+        evaluator_->update_accumulator(board, move, ctx.accumulator_stack[ply], ctx.accumulator_stack[ply + 1]);
         board.make_move(move, state);
-        repetition_stack_.push_back(board.zobrist_key());
-        int score = -quiescence(board, -beta, -alpha, ply + 1);
-        repetition_stack_.pop_back();
+        ctx.repetition_stack.push_back(board.zobrist_key());
+        int score = -quiescence(ctx, board, -beta, -alpha, ply + 1);
+        ctx.repetition_stack.pop_back();
         board.undo_move(move, state);
 
         if (score >= beta) {
@@ -534,23 +622,24 @@ void Search::update_killers(std::array<Move, 2>& killers, const Move& move) {
     killers[0] = move;
 }
 
-void Search::update_history(const Move& move, int depth, Color mover) {
+void Search::update_history(ThreadContext& ctx, const Move& move, int depth, Color mover) {
     if (move.is_capture() || move.is_promotion()) {
         return;
     }
     int bonus = depth * depth;
-    int& entry = history_[static_cast<int>(mover)][move.from][move.to];
+    int& entry = ctx.history[static_cast<int>(mover)][move.from][move.to];
     entry = std::clamp(entry + bonus, -4000, 4000);
 }
 
-int Search::history_score(const Move& move, Color mover) const {
+int Search::history_score(const ThreadContext& ctx, const Move& move, Color mover) const {
     if (move.is_capture() || move.is_promotion()) {
         return 0;
     }
-    return history_[static_cast<int>(mover)][move.from][move.to];
+    return ctx.history[static_cast<int>(mover)][move.from][move.to];
 }
 
 bool Search::probe_tt(std::uint64_t key, int ply, TTEntry& entry) const {
+    std::shared_lock lock(tt_mutex_);
     const TTEntry& probe = entry_for_key(key);
     if (probe.flag != static_cast<std::uint8_t>(TTFlag::Empty) && probe.key == key) {
         entry = probe;
@@ -561,6 +650,7 @@ bool Search::probe_tt(std::uint64_t key, int ply, TTEntry& entry) const {
 }
 
 void Search::store_tt(std::uint64_t key, int depth, int score, const Move& move, std::uint8_t flag, int ply) {
+    std::unique_lock lock(tt_mutex_);
     TTEntry& entry = entry_for_key(key);
     int stored = to_tt_score(score, ply);
     if (entry.flag == static_cast<std::uint8_t>(TTFlag::Empty) || entry.depth <= depth || entry.age != generation_) {
@@ -583,7 +673,7 @@ bool Search::should_stop() const {
     if (stop_signal_ && stop_signal_->load()) {
         return true;
     }
-    if (node_limit_ && nodes_ >= node_limit_) {
+    if (node_limit_ && nodes_total_.load(std::memory_order_relaxed) >= node_limit_) {
         return true;
     }
     if (time_limit_.count() > 0) {
@@ -620,6 +710,7 @@ std::vector<Move> Search::extract_pv(Board& board) const {
     states.reserve(64);
     for (int depth = 0; depth < 64; ++depth) {
         std::uint64_t key = copy.zobrist_key();
+        std::shared_lock lock(tt_mutex_);
         const TTEntry& entry = entry_for_key(key);
         if (entry.flag == static_cast<std::uint8_t>(TTFlag::Empty) || entry.key != key) {
             break;
@@ -637,6 +728,39 @@ std::vector<Move> Search::extract_pv(Board& board) const {
         }
     }
     return pv;
+}
+
+void Search::ensure_context_capacity(ThreadContext& ctx, int depth) {
+    int required = std::max(depth + 5, 64);
+    if (static_cast<int>(ctx.accumulator_stack.size()) < required) {
+        ctx.accumulator_stack.resize(static_cast<std::size_t>(required));
+    }
+    if (static_cast<int>(ctx.stack.size()) < required) {
+        ctx.stack.resize(static_cast<std::size_t>(required));
+    }
+    if (static_cast<int>(ctx.killer_moves.size()) < required) {
+        std::size_t old_size = ctx.killer_moves.size();
+        ctx.killer_moves.resize(static_cast<std::size_t>(required));
+        for (std::size_t i = old_size; i < ctx.killer_moves.size(); ++i) {
+            ctx.killer_moves[i] = {Move{}, Move{}};
+        }
+    }
+}
+
+void Search::reset_context(ThreadContext& ctx) {
+    for (auto& killers : ctx.killer_moves) {
+        killers[0] = Move{};
+        killers[1] = Move{};
+    }
+    std::memset(ctx.history, 0, sizeof(ctx.history));
+    ctx.repetition_stack.clear();
+}
+
+void Search::atomic_max(std::atomic<int>& target, int value) {
+    int current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
 }
 
 }  // namespace chiron

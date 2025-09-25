@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+endif()
+
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
 enable_testing()
 
 add_library(chiron_lib
@@ -39,8 +45,10 @@ target_include_directories(chiron_lib
 
 if (MSVC)
     target_compile_options(chiron_lib PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(chiron_lib PRIVATE $<$<CONFIG:Release>:/O2 /Ot /Oi /GL /DNDEBUG>)
 else()
     target_compile_options(chiron_lib PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(chiron_lib PRIVATE $<$<CONFIG:Release>:-O3 -march=native -DNDEBUG -flto -fno-omit-frame-pointer>)
 endif()
 
 add_executable(chiron src/main.cpp)
@@ -62,6 +70,14 @@ add_executable(chiron_tests
     tests/test_training.cpp
 )
 target_link_libraries(chiron_tests PRIVATE chiron_lib GTest::gtest_main)
+
+if (MSVC)
+    target_link_options(chiron PRIVATE $<$<CONFIG:Release>:/LTCG>)
+    target_link_options(chiron_tests PRIVATE $<$<CONFIG:Release>:/LTCG>)
+else()
+    target_link_options(chiron PRIVATE $<$<CONFIG:Release>:-flto>)
+    target_link_options(chiron_tests PRIVATE $<$<CONFIG:Release>:-flto>)
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(chiron_tests)

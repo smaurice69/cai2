@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "board.h"
@@ -41,7 +43,8 @@ class Evaluator {
 
     std::string network_path_;
     mutable Network network_{};
-    mutable bool network_loaded_ = false;
+    mutable std::atomic<bool> network_loaded_{false};
+    mutable std::mutex load_mutex_;
 };
 
 }  // namespace chiron::nnue

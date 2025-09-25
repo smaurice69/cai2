@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 #include "board.h"
@@ -110,13 +112,23 @@ class Search {
 
     SearchResult search_impl(Board& board, const SearchLimits& limits, std::atomic<bool>& stop_flag,
                              const InfoCallback& info_cb);
-    int search_root(Board& board, int depth, int alpha, int beta);
-    int negamax(Board& board, int depth, int alpha, int beta, bool allow_null, int ply);
-    int quiescence(Board& board, int alpha, int beta, int ply);
+
+    struct ThreadContext {
+        std::vector<nnue::Accumulator> accumulator_stack;
+        std::vector<SearchStackEntry> stack;
+        std::vector<std::array<Move, 2>> killer_moves;
+        int history[kNumColors][kBoardSize][kBoardSize]{};
+        std::vector<std::uint64_t> repetition_stack;
+    };
+
+    int search_root(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, Move& best_move);
+    int search_root_worker(ThreadContext& ctx, Board& board, const Move& move, int depth, int alpha, int beta);
+    int negamax(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, bool allow_null, int ply);
+    int quiescence(ThreadContext& ctx, Board& board, int alpha, int beta, int ply);
 
     void update_killers(std::array<Move, 2>& killers, const Move& move);
-    void update_history(const Move& move, int depth, Color mover);
-    int history_score(const Move& move, Color mover) const;
+    void update_history(ThreadContext& ctx, const Move& move, int depth, Color mover);
+    int history_score(const ThreadContext& ctx, const Move& move, Color mover) const;
 
     bool probe_tt(std::uint64_t key, int ply, TTEntry& entry) const;
     void store_tt(std::uint64_t key, int depth, int score, const Move& move, std::uint8_t flag, int ply);
@@ -127,14 +139,14 @@ class Search {
     std::chrono::milliseconds compute_time_budget(const Board& board, const SearchLimits& limits) const;
     std::vector<Move> extract_pv(Board& board) const;
 
+    void ensure_context_capacity(ThreadContext& ctx, int depth);
+    void reset_context(ThreadContext& ctx);
+    static void atomic_max(std::atomic<int>& target, int value);
+
     std::vector<TTEntry> table_;
     std::shared_ptr<nnue::Evaluator> evaluator_;
     TimeManager time_manager_{};
-    std::vector<nnue::Accumulator> accumulator_stack_;
-    std::vector<SearchStackEntry> stack_;
-    std::vector<std::array<Move, 2>> killer_moves_;
-    int history_[kNumColors][kBoardSize][kBoardSize]{};
-    std::vector<std::uint64_t> repetition_stack_;
+    std::vector<ThreadContext> contexts_;
 
     InfoCallback info_callback_;
     std::atomic<bool>* stop_signal_ = nullptr;
@@ -143,8 +155,9 @@ class Search {
     std::uint64_t node_limit_ = 0;
     std::size_t generation_ = 0;
     int thread_count_ = 1;
-    mutable std::uint64_t nodes_ = 0;
-    mutable int seldepth_ = 0;
+    mutable std::shared_mutex tt_mutex_;
+    std::atomic<std::uint64_t> nodes_total_{0};
+    std::atomic<int> seldepth_total_{0};
 };
 
 }  // namespace chiron
