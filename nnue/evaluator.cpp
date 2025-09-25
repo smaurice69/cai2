@@ -25,6 +25,10 @@ void Evaluator::ensure_network_loaded() const {
     if (network_loaded_.load(std::memory_order_acquire)) {
         return;
     }
+    std::scoped_lock lock(load_mutex_);
+    if (network_loaded_) {
+        return;
+    }
     try {
         if (!network_path_.empty()) {
             network_.load_from_file(network_path_);
