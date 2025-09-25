@@ -21,8 +21,9 @@ struct TrainingExample {
  */
 class ParameterSet {
    public:
-    ParameterSet();
+    explicit ParameterSet(std::size_t hidden_size = nnue::kDefaultHiddenSize);
 
+    void reset(std::size_t hidden_size);
     void load(const std::string& path);
     void save(const std::string& path) const;
 

@@ -131,15 +131,17 @@ Key options:
 * `--training-rate RATE` – Learning rate for the internal trainer.
 * `--training-output PATH` – Where to store the continually updated NNUE weights.
 * `--training-history DIR` – Optional directory for archiving per-step snapshots.
+* `--training-hidden SIZE` – Number of hidden neurons used when initialising a new NNUE evaluator.
 
 
 * `--verbose` – Print per-move search telemetry and training updates during self-play.
+* `--verboselite` – Emit a single line summary as each game finishes without the full move-by-move trace.
 
 Training batches are accumulated from every game (start position plus subsequent FENs). When the buffer exceeds the requested batch size, the trainer performs an optimisation step, saves the updated network, and reloads it for subsequent games.
 
 ### Verbose Telemetry
 
-Enable `--verbose` to monitor self-play in real time. Each move is reported with its SAN notation, search depth/seldepth, evaluation (centipawns or mate score), node counts, NPS, elapsed time, and the current principal variation—useful insight for chess programmers inspecting move ordering and search stability. After every game, and whenever the training buffer flushes, verbose mode also prints how many positions were collected, the running totals processed, and where updated NNUE weights and history snapshots were written, giving AI practitioners clear feedback on dataset growth and model iteration cadence.
+Enable `--verbose` to monitor self-play in real time. Each move is reported with its SAN notation, search depth/seldepth, evaluation (centipawns or mate score), node counts, NPS, elapsed time, and the current principal variation—useful insight for chess programmers inspecting move ordering and search stability. After every game, and whenever the training buffer flushes, verbose mode also prints how many positions were collected, the running totals processed, and where updated NNUE weights and history snapshots were written, giving AI practitioners clear feedback on dataset growth and model iteration cadence. When you only need lightweight progress feedback, `--verboselite` prints a concise “Game N complete” line capturing the result, termination reason, and duration while keeping the console quiet between moves.
 
 ### Model Storage
 
