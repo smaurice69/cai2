@@ -90,6 +90,21 @@ bool insufficient_material(const Board& board) {
     return false;
 }
 
+int orient_target_for_fen(const std::string& fen, int base_target) {
+    if (base_target == 0) {
+        return 0;
+    }
+    std::size_t space = fen.find(' ');
+    if (space == std::string::npos || space + 1 >= fen.size()) {
+        return base_target;
+    }
+    char side = fen[space + 1];
+    if (side == 'b' || side == 'B') {
+        return -base_target;
+    }
+    return base_target;
+}
+
 std::string escape_json(const std::string& value) {
     std::string escaped;
     escaped.reserve(value.size());
@@ -679,17 +694,17 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
         return;
     }
 
-    int target = 0;
+    int base_target = 0;
     if (result.result == "1-0") {
-        target = 1000;
+        base_target = 1000;
     } else if (result.result == "0-1") {
-        target = -1000;
+        base_target = -1000;
     }
 
     std::lock_guard<std::mutex> lock(training_mutex_);
-    training_buffer_.push_back({result.start_fen, target});
+    training_buffer_.push_back({result.start_fen, orient_target_for_fen(result.start_fen, base_target)});
     for (const std::string& fen : result.fens) {
-        training_buffer_.push_back({fen, target});
+        training_buffer_.push_back({fen, orient_target_for_fen(fen, base_target)});
     }
 
     std::size_t added = 1 + result.fens.size();
