@@ -120,7 +120,9 @@ Stockfish offers world-class evaluation quality and can dramatically improve Chi
      --output nnue/models/chiron-teacher-latest.nnue
    ```
 
-   The `train-teacher` command plays fresh self-play games, sends each FEN to Stockfish for a centipawn label, and immediately updates the NNUE network. Add `--device gpu` if you compiled with CUDA support to train on your GPU.
+
+   The `train-teacher` command plays fresh self-play games, sends each FEN to Stockfish for a centipawn label, and immediately updates the NNUE network. Add `--verboselite` for lightweight per-game progress (or `--verbose` for full move logs). Include `--device gpu` if you compiled with CUDA support to train on your GPU.
+
 
 5. **Record teacher metadata**
    Save the Stockfish version and benchmark inside a sidecar file so you can reproduce results later:

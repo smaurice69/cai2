@@ -518,6 +518,10 @@ int run_train_teacher_command(const std::vector<std::string>& args) {
             config.training_batch_size = parse_size(args, i, opt);
         } else if (opt == "--teacher-batch") {
             config.teacher_chunk_size = parse_size(args, i, opt);
+        } else if (opt == "--verbose") {
+            config.verbose = true;
+        } else if (opt == "--verboselite") {
+            config.verbose_lite = true;
         } else if (opt == "--learning-rate") {
             config.training_learning_rate = parse_double(args, i, opt);
         } else if (opt == "--output") {
