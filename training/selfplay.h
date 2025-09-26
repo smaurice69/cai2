@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <string>
@@ -10,6 +11,7 @@
 
 #include "board.h"
 #include "search.h"
+#include "tools/teacher.h"
 #include "training/trainer.h"
 
 namespace chiron {
@@ -44,6 +46,10 @@ struct SelfPlayConfig {
     std::string training_output_path = "nnue/models/chiron-selfplay-latest.nnue";
     std::string training_history_dir = "nnue/models/history";
     std::size_t training_hidden_size = nnue::kDefaultHiddenSize;
+    TrainerDevice training_device = TrainerDevice::kCPU;
+    bool teacher_mode = false;
+    TeacherConfig teacher{};
+    std::size_t teacher_chunk_size = 256;
     double randomness_temperature = 0.0;  /**< Softmax temperature for randomized move selection. */
     int randomness_max_ply = 0;           /**< Apply randomness up to this ply (0 = entire game). */
     int randomness_top_moves = 3;         /**< Consider at most this many moves when randomizing. */
@@ -79,6 +85,9 @@ class SelfPlayOrchestrator {
     void log_verbose(const std::string& message);
     void log_lite(const std::string& message);
     Move select_move(const SearchResult& search_result, int ply);
+    void train_buffer_if_ready_locked(bool force);
+    void process_teacher_batch(std::vector<std::string> fen_batch, bool force);
+    void finalize_training();
 
     SelfPlayConfig config_;
     std::mt19937 rng_;
@@ -91,6 +100,8 @@ class SelfPlayOrchestrator {
     Trainer trainer_;
     ParameterSet parameters_;
     std::vector<TrainingExample> training_buffer_;
+    std::vector<std::string> teacher_queue_;
+    std::unique_ptr<TeacherEngine> teacher_engine_;
     int training_iteration_ = 0;
     std::string training_history_prefix_;
     std::string training_history_extension_;
