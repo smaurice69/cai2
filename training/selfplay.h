@@ -12,6 +12,7 @@
 #include "board.h"
 #include "search.h"
 #include "tools/teacher.h"
+#include "training/elo_tracker.h"
 #include "training/trainer.h"
 
 namespace chiron {
@@ -84,6 +85,8 @@ class SelfPlayOrchestrator {
     void handle_training(const SelfPlayResult& result);
     void log_verbose(const std::string& message);
     void log_lite(const std::string& message);
+    void record_elo(int game_index, const SelfPlayResult& result);
+    void log_rating_snapshot(const std::string& prefix);
     Move select_move(const SearchResult& search_result, int ply);
     void train_buffer_if_ready_locked(bool force);
     void process_teacher_batch(std::vector<std::string> fen_batch, bool force);
@@ -97,6 +100,7 @@ class SelfPlayOrchestrator {
     std::mutex log_mutex_;
     std::mutex training_mutex_;
     mutable std::mutex config_mutex_;
+    std::mutex elo_mutex_;
     Trainer trainer_;
     ParameterSet parameters_;
     std::vector<TrainingExample> training_buffer_;
@@ -107,6 +111,7 @@ class SelfPlayOrchestrator {
     std::string training_history_extension_;
     std::size_t total_positions_collected_ = 0;
     std::size_t total_positions_trained_ = 0;
+    EloTracker elo_tracker_{};
   
     int detect_existing_history_iteration() const;
 };

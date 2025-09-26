@@ -162,6 +162,34 @@ std::string format_moves(const std::vector<std::string>& moves) {
     return oss.str();
 }
 
+double result_to_white_score(const std::string& result) {
+    if (result == "1-0") {
+        return 1.0;
+    }
+    if (result == "0-1") {
+        return 0.0;
+    }
+    if (result == "1/2-1/2" || result == "0.5-0.5") {
+        return 0.5;
+    }
+    return -1.0;
+}
+
+std::string format_player_update(const EloTracker::PlayerSummary& summary) {
+    std::ostringstream oss;
+    oss << summary.name << ' ' << std::fixed << std::setprecision(1) << summary.rating;
+    double delta = summary.delta;
+    oss << " (" << (delta >= 0.0 ? '+' : '-') << std::setprecision(2) << std::fabs(delta) << ')';
+    if (summary.games > 0) {
+        double percentage = (summary.score / static_cast<double>(summary.games)) * 100.0;
+        oss << ", score " << std::setprecision(1) << percentage << "% over " << summary.games
+            << " (W" << summary.wins << " D" << summary.draws << " L" << summary.losses << ')';
+    } else {
+        oss << ", no games";
+    }
+    return oss.str();
+}
+
 std::string move_to_san(Board& board, const Move& move) {
     if (move.is_castle()) {
         return (move.flags & MoveFlag::KingCastle) ? "O-O" : "O-O-O";
@@ -449,6 +477,7 @@ void SelfPlayOrchestrator::run() {
     }
 
     finalize_training();
+    log_rating_snapshot("[Elo] Final ratings: ");
 }
 
 SelfPlayResult SelfPlayOrchestrator::play_game(int game_index, const EngineConfig& white, const EngineConfig& black,
@@ -473,6 +502,7 @@ SelfPlayResult SelfPlayOrchestrator::play_game(int game_index, const EngineConfi
         }
     }
     handle_training(result);
+    record_elo(game_index, result);
     if (config_.verbose) {
         std::ostringstream summary;
         summary << "[Game " << (game_index + 1) << "] Final: " << result.result << " (" << result.termination
@@ -933,6 +963,10 @@ void SelfPlayOrchestrator::train_buffer_if_ready_locked(bool force) {
         }
         log_verbose(train_msg.str());
     }
+
+    std::ostringstream prefix;
+    prefix << "[Elo] Ratings after training iteration " << training_iteration_ << ": ";
+    log_rating_snapshot(prefix.str());
 }
 
 void SelfPlayOrchestrator::process_teacher_batch(std::vector<std::string> fen_batch, bool force) {
@@ -1003,6 +1037,53 @@ void SelfPlayOrchestrator::log_lite(const std::string& message) {
     std::cout << message << std::endl;
 
 
+}
+
+void SelfPlayOrchestrator::record_elo(int game_index, const SelfPlayResult& result) {
+    double score = result_to_white_score(result.result);
+    if (score < 0.0) {
+        return;
+    }
+
+    EloTracker::GameUpdate update;
+    {
+        std::lock_guard<std::mutex> elo_lock(elo_mutex_);
+        update = elo_tracker_.record_game(result.white_player, result.black_player, score);
+    }
+
+    std::ostringstream message;
+    message << "[Elo] Game " << (game_index + 1) << ": " << format_player_update(update.white)
+            << " | " << format_player_update(update.black);
+    log_lite(message.str());
+}
+
+void SelfPlayOrchestrator::log_rating_snapshot(const std::string& prefix) {
+    std::vector<EloTracker::PlayerSummary> snapshot;
+    {
+        std::lock_guard<std::mutex> elo_lock(elo_mutex_);
+        snapshot = elo_tracker_.snapshot();
+    }
+    if (snapshot.empty()) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << prefix;
+    for (std::size_t i = 0; i < snapshot.size(); ++i) {
+        if (i > 0) {
+            oss << " | ";
+        }
+        const auto& entry = snapshot[i];
+        oss << entry.name << ' ' << std::fixed << std::setprecision(1) << entry.rating;
+        if (entry.games > 0) {
+            double score_pct = (entry.score / static_cast<double>(entry.games)) * 100.0;
+            oss << " (W" << entry.wins << " D" << entry.draws << " L" << entry.losses << ", score "
+                << std::setprecision(1) << score_pct << "% over " << entry.games << " games)";
+        } else {
+            oss << " (no games)";
+        }
+    }
+    log_lite(oss.str());
 }
 
 int SelfPlayOrchestrator::detect_existing_history_iteration() const {

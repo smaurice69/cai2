@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -130,6 +132,48 @@ TrainerDevice parse_trainer_device_option(const std::string& value) {
         return TrainerDevice::kGPU;
     }
     throw std::invalid_argument("Unknown training device: " + value);
+}
+
+struct DatasetEvaluationResult {
+    double accuracy = 0.0;
+    double pseudo_elo = 0.0;
+    std::size_t samples = 0;
+};
+
+DatasetEvaluationResult evaluate_dataset_performance(const std::vector<TrainingExample>& data,
+                                                     const ParameterSet& parameters,
+                                                     const Trainer& trainer,
+                                                     std::size_t max_samples = 4096) {
+    DatasetEvaluationResult result;
+    if (data.empty() || max_samples == 0) {
+        return result;
+    }
+
+    std::size_t sample_count = std::min(max_samples, data.size());
+    double total_score = 0.0;
+    double step = static_cast<double>(data.size()) / static_cast<double>(sample_count);
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        std::size_t index = static_cast<std::size_t>(i * step);
+        if (index >= data.size()) {
+            index = data.size() - 1;
+        }
+        const TrainingExample& example = data[index];
+        int predicted_cp = trainer.evaluate_example(example, parameters);
+        double predicted_prob = 1.0 / (1.0 + std::exp(-static_cast<double>(predicted_cp) / 400.0));
+        double actual_prob = 0.5;
+        if (example.target_cp > 50) {
+            actual_prob = 1.0;
+        } else if (example.target_cp < -50) {
+            actual_prob = 0.0;
+        }
+        total_score += 1.0 - std::fabs(predicted_prob - actual_prob);
+    }
+
+    result.samples = sample_count;
+    result.accuracy = total_score / static_cast<double>(sample_count);
+    double clipped = std::clamp(result.accuracy, 0.01, 0.99);
+    result.pseudo_elo = 400.0 * std::log10(clipped / (1.0 - clipped));
+    return result;
 }
 
 int run_perft(const std::vector<std::string>& args) {
@@ -442,6 +486,22 @@ int run_train_command(const std::vector<std::string>& args) {
     }
 
     Trainer trainer(Trainer::Config{learning_rate, 0.0005, trainer_device});
+
+    auto log_dataset_eval = [](const std::string& prefix, const DatasetEvaluationResult& eval) {
+        if (eval.samples == 0) {
+            return;
+        }
+        std::ostringstream oss;
+        oss << prefix << std::fixed << std::setprecision(1) << eval.pseudo_elo
+            << ", accuracy " << std::setprecision(1) << (eval.accuracy * 100.0) << "% over " << eval.samples
+            << " samples";
+        std::cout << oss.str() << std::endl;
+    };
+
+    constexpr std::size_t kEvaluationSamples = 4096;
+    DatasetEvaluationResult baseline = evaluate_dataset_performance(data, parameters, trainer, kEvaluationSamples);
+    log_dataset_eval("[Train] Baseline pseudo-Elo ", baseline);
+
     for (int iteration = 0; iteration < iterations; ++iteration) {
         for (std::size_t offset = 0; offset < data.size(); offset += batch_size) {
             std::size_t end = std::min(offset + batch_size, data.size());
@@ -449,6 +509,11 @@ int run_train_command(const std::vector<std::string>& args) {
                                               data.begin() + static_cast<std::ptrdiff_t>(end));
             trainer.train_batch(batch, parameters);
         }
+        DatasetEvaluationResult iteration_eval =
+            evaluate_dataset_performance(data, parameters, trainer, kEvaluationSamples);
+        std::ostringstream prefix;
+        prefix << "[Train] Iteration " << (iteration + 1) << " pseudo-Elo ";
+        log_dataset_eval(prefix.str(), iteration_eval);
     }
 
     if (!output_path.empty()) {
