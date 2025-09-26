@@ -178,6 +178,14 @@ int run_selfplay(const std::vector<std::string>& args) {
             config.training_history_dir = args[++i];
         } else if (opt == "--training-hidden") {
             config.training_hidden_size = parse_size(args, i, opt);
+        } else if (opt == "--randomness-temperature") {
+            config.randomness_temperature = parse_double(args, i, opt);
+        } else if (opt == "--randomness-top-moves") {
+            config.randomness_top_moves = parse_int(args, i, opt);
+        } else if (opt == "--randomness-score-margin") {
+            config.randomness_score_margin = parse_int(args, i, opt);
+        } else if (opt == "--randomness-max-ply") {
+            config.randomness_max_ply = parse_int(args, i, opt);
         } else {
             throw std::invalid_argument("Unknown selfplay option: " + opt);
         }

@@ -5,10 +5,11 @@
 #include <cmath>
 #include <exception>
 #include <ctime>
-#include <iomanip>
-#include <ios>
 #include <filesystem>
 #include <iostream>
+#include <iomanip>
+#include <ios>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -367,6 +368,22 @@ void SelfPlayOrchestrator::run() {
                 << (config_.black.network_path.empty() ? "<default>" : config_.black.network_path) << ')';
         log_verbose(engines.str());
 
+        if (config_.randomness_temperature > 0.0) {
+            std::ostringstream randomness;
+            randomness << "[SelfPlay] Randomness enabled (temperature " << config_.randomness_temperature;
+            if (config_.randomness_top_moves > 0) {
+                randomness << ", top " << config_.randomness_top_moves;
+            }
+            if (config_.randomness_score_margin > 0) {
+                randomness << ", margin " << config_.randomness_score_margin << "cp";
+            }
+            if (config_.randomness_max_ply > 0) {
+                randomness << ", max ply " << config_.randomness_max_ply;
+            }
+            randomness << ')';
+            log_verbose(randomness.str());
+        }
+
         if (config_.enable_training) {
             std::ostringstream train;
             train << "[Train] Batch size " << config_.training_batch_size << ", learning rate "
@@ -550,7 +567,7 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int game_index, const Engi
             search_result = current_search.search(board, limits);
         }
 
-        Move best = search_result.best_move;
+        Move best = select_move(search_result, ply);
         if (is_null_move(best)) {
             bool in_check = board.in_check(board.side_to_move());
             if (in_check) {
@@ -634,6 +651,82 @@ SelfPlayResult SelfPlayOrchestrator::play_single_game(int game_index, const Engi
     result.duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
     return result;
+}
+
+Move SelfPlayOrchestrator::select_move(const SearchResult& search_result, int ply) {
+    Move deterministic = search_result.best_move;
+    if (config_.randomness_temperature <= 0.0) {
+        return deterministic;
+    }
+    if (config_.randomness_max_ply > 0 && ply >= config_.randomness_max_ply) {
+        return deterministic;
+    }
+    if (search_result.root_moves.empty()) {
+        return deterministic;
+    }
+
+    int limit = config_.randomness_top_moves > 0
+                    ? std::min(config_.randomness_top_moves,
+                               static_cast<int>(search_result.root_moves.size()))
+                    : static_cast<int>(search_result.root_moves.size());
+    if (limit <= 1) {
+        return deterministic;
+    }
+
+    int best_score = search_result.root_moves.front().second;
+    std::vector<std::pair<Move, int>> candidates;
+    candidates.reserve(static_cast<std::size_t>(limit));
+    for (int i = 0; i < limit; ++i) {
+        const auto& entry = search_result.root_moves[static_cast<std::size_t>(i)];
+        if (config_.randomness_score_margin <= 0 ||
+            entry.second >= best_score - config_.randomness_score_margin) {
+            candidates.push_back(entry);
+        }
+    }
+
+    if (candidates.size() <= 1) {
+        return deterministic;
+    }
+
+    double temperature = config_.randomness_temperature;
+    if (temperature <= 0.0) {
+        return deterministic;
+    }
+
+    double max_scaled = -std::numeric_limits<double>::infinity();
+    std::vector<double> scaled;
+    scaled.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        double scaled_value = static_cast<double>(candidate.second) / temperature;
+        scaled.push_back(scaled_value);
+        if (scaled_value > max_scaled) {
+            max_scaled = scaled_value;
+        }
+    }
+
+    std::vector<double> weights;
+    weights.reserve(candidates.size());
+    double sum = 0.0;
+    for (double value : scaled) {
+        double weight = std::exp(value - max_scaled);
+        weights.push_back(weight);
+        sum += weight;
+    }
+
+    if (sum <= 0.0) {
+        return deterministic;
+    }
+
+    std::uniform_real_distribution<double> dist(0.0, sum);
+    double target = dist(rng_);
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        target -= weights[i];
+        if (target <= 0.0) {
+            return candidates[i].first;
+        }
+    }
+
+    return candidates.back().first;
 }
 
 void SelfPlayOrchestrator::log_result(int game_index, const SelfPlayResult& result) {

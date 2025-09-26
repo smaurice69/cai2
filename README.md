@@ -142,6 +142,10 @@ Key options:
 * `--training-output PATH` – Where to store the continually updated NNUE weights.
 * `--training-history DIR` – Optional directory for archiving per-step snapshots.
 * `--training-hidden SIZE` – Number of hidden neurons used when initialising a new NNUE evaluator.
+* `--randomness-temperature T` – Enable stochastic move selection with softmax temperature `T > 0`.
+* `--randomness-top-moves N` – Sample only among the top `N` root moves (default 3).
+* `--randomness-score-margin CP` – Restrict sampling to moves within `CP` centipawns of the best score.
+* `--randomness-max-ply P` – Apply randomness only through ply `P` (0 keeps it on for the whole game).
 
 
 * `--verbose` – Print per-move search telemetry and training updates during self-play.
