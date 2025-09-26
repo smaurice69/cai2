@@ -16,13 +16,30 @@ EloTracker::EloTracker(double initial_rating, double k_factor)
     : initial_rating_(initial_rating), k_factor_(k_factor) {}
 
 EloTracker::GameUpdate EloTracker::record_game(const std::string& white, const std::string& black, double white_score) {
-    auto [white_it, white_inserted] = players_.try_emplace(white);
-    auto [black_it, black_inserted] = players_.try_emplace(black);
+    std::string white_key = white;
+    std::string black_key = black;
+    std::string white_display = white;
+    std::string black_display = black;
+    if (white_key == black_key) {
+        white_key += " (White)";
+        black_key += " (Black)";
+        white_display = white_key;
+        black_display = black_key;
+    }
+
+    auto [white_it, white_inserted] = players_.try_emplace(white_key);
+    auto [black_it, black_inserted] = players_.try_emplace(black_key);
     if (white_inserted) {
         white_it->second.rating = initial_rating_;
     }
     if (black_inserted) {
         black_it->second.rating = initial_rating_;
+    }
+    if (white_it->second.display_name.empty()) {
+        white_it->second.display_name = white_display;
+    }
+    if (black_it->second.display_name.empty()) {
+        black_it->second.display_name = black_display;
     }
 
     InternalStats& white_stats = white_it->second;
@@ -55,7 +72,7 @@ EloTracker::GameUpdate EloTracker::record_game(const std::string& white, const s
     black_stats.score += black_score;
 
     GameUpdate update;
-    update.white.name = white;
+    update.white.name = white_stats.display_name.empty() ? white : white_stats.display_name;
     update.white.rating = white_stats.rating;
     update.white.delta = white_stats.rating - previous_white;
     update.white.games = white_stats.games;
@@ -64,7 +81,7 @@ EloTracker::GameUpdate EloTracker::record_game(const std::string& white, const s
     update.white.losses = white_stats.losses;
     update.white.score = white_stats.score;
 
-    update.black.name = black;
+    update.black.name = black_stats.display_name.empty() ? black : black_stats.display_name;
     update.black.rating = black_stats.rating;
     update.black.delta = black_stats.rating - previous_black;
     update.black.games = black_stats.games;
@@ -83,7 +100,7 @@ std::vector<EloTracker::PlayerSummary> EloTracker::snapshot() const {
     table.reserve(players_.size());
     for (const auto& [name, stats] : players_) {
         PlayerSummary summary;
-        summary.name = name;
+        summary.name = stats.display_name.empty() ? name : stats.display_name;
         summary.rating = stats.rating == 0.0 && stats.games == 0 ? initial_rating_ : stats.rating;
         summary.games = stats.games;
         summary.wins = stats.wins;
