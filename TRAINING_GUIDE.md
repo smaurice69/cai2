@@ -35,7 +35,7 @@ Chiron ships with a lightweight NNUE evaluator. To bootstrap training:
 
 ## 3. Grow the Training Dataset
 
-1. **Self-play expansion** – Increase `--games`, `--depth`, and `--concurrency` as your hardware allows, and add `--record-fens data/selfplay_fens.txt` to accumulate labelled positions. More games diversify the dataset and stabilise learning.
+1. **Self-play expansion** – Increase `--games`, `--depth`, and `--concurrency` as your hardware allows, and add the `--record-fens` flag so each game's FEN timeline is written to the results log. Point `--results` at a path inside `data/` (for example `data/selfplay_results.jsonl`) and post-process it into a standalone FEN file with a tool such as `jq` or PowerShell's `ConvertFrom-Json`. More games diversify the dataset and stabilise learning.
 2. **External data** – Convert public PGN dumps or lichess puzzles into training samples. See [Section 3.2](#32-build-a-training-set-from-public-chess-databases) for a full workflow covering sourcing, filtering, and conversion.
 3. **Teacher annotations** – Use a stronger engine to annotate FENs gathered from self-play for supervised learning. Refer to [Section 3.1](#31-integrate-stockfish-as-a-teacher) for a step-by-step example with Stockfish:
    ```bash
@@ -71,8 +71,23 @@ Stockfish offers world-class evaluation quality and can dramatically improve Chi
 3. **Prepare positions for annotation**
    Generate and deduplicate FENs before sending them to the teacher to avoid wasted effort:
    ```bash
-   ./build/chiron selfplay --games 100 --record-fens data/selfplay_raw.fens
+   ./build/chiron selfplay \
+     --games 100 \
+     --record-fens \
+     --results data/selfplay_results.jsonl
+   jq -r 'select(.fens) | .fens[]' data/selfplay_results.jsonl > data/selfplay_raw.fens
    awk '!seen[$0]++' data/selfplay_raw.fens > data/selfplay_unique.fens
+
+   # PowerShell equivalent
+   .\out\build\x64-Release\chiron.exe selfplay `
+     --games 100 `
+     --record-fens `
+     --results data/selfplay_results.jsonl
+   Get-Content data/selfplay_results.jsonl | % { ($_ | ConvertFrom-Json).fens } | Set-Content data/selfplay_raw.fens
+   Get-Content data/selfplay_raw.fens | Select-Object -Unique | Set-Content data/selfplay_unique.fens
+
+   # Note: --record-fens is a switch. Passing a filename (for example `--record-fens data/selfplay_raw.fens`) raises
+   # "Unknown selfplay option" because the CLI interprets the path as a separate flag.
    ```
 
 4. **Annotate with the teacher tool**
