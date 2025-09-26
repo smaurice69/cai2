@@ -84,6 +84,7 @@ add_executable(chiron_tests
     tests/test_selfplay.cpp
     tests/test_training.cpp
     tests/test_evaluation.cpp
+    tests/test_search.cpp
 )
 target_link_libraries(chiron_tests PRIVATE chiron_lib GTest::gtest_main)
 
