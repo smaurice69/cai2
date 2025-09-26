@@ -220,7 +220,9 @@ chiron.exe train-teacher `
   --history nnue\\models\\teacher-history
 ```
 
+
 The `--search-depth` flag controls how deeply Chiron explores each self-play move while the teacher depth governs Stockfish's evaluation quality. `--teacher-batch` limits how many FENs are sent to the teacher in one go (keeping the UCI pipe responsive), while `--batch` determines the optimiser's batch size. The command inherits all self-play options such as `--concurrency`, `--table-size`, and network overrides. Add `--verboselite` to emit a concise per-game summary (or `--verbose` for full telemetry). Combine it with `--device gpu` (see below) to train on a CUDA-enabled system.
+
 
 ## Dataset & Teacher Workflow
 
