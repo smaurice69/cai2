@@ -44,6 +44,10 @@ struct SelfPlayConfig {
     std::string training_output_path = "nnue/models/chiron-selfplay-latest.nnue";
     std::string training_history_dir = "nnue/models/history";
     std::size_t training_hidden_size = nnue::kDefaultHiddenSize;
+    double randomness_temperature = 0.0;  /**< Softmax temperature for randomized move selection. */
+    int randomness_max_ply = 0;           /**< Apply randomness up to this ply (0 = entire game). */
+    int randomness_top_moves = 3;         /**< Consider at most this many moves when randomizing. */
+    int randomness_score_margin = 50;     /**< Only randomize among moves within this score margin (cp). */
 };
 
 struct SelfPlayResult {
@@ -74,6 +78,7 @@ class SelfPlayOrchestrator {
     void handle_training(const SelfPlayResult& result);
     void log_verbose(const std::string& message);
     void log_lite(const std::string& message);
+    Move select_move(const SearchResult& search_result, int ply);
 
     SelfPlayConfig config_;
     std::mt19937 rng_;

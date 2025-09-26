@@ -170,6 +170,7 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
     Move last_best{};
     int aspiration = 18;
     int previous_score = 0;
+    std::vector<std::pair<Move, int>> iteration_root_moves;
 
     for (int depth = 1; depth <= max_depth; ++depth) {
         if (should_stop()) {
@@ -193,7 +194,7 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
 
         Move iteration_best{};
         while (true) {
-            score = search_root(main_ctx, board, depth, alpha, beta, iteration_best);
+            score = search_root(main_ctx, board, depth, alpha, beta, iteration_best, iteration_root_moves);
             if (stop_flag.load()) {
                 break;
             }
@@ -248,6 +249,7 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
         best.seldepth = seldepth_total_.load(std::memory_order_relaxed);
         best.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time_);
         best.pv = extract_pv(board);
+        best.root_moves = iteration_root_moves;
         if (!best.pv.empty()) {
             best.best_move = best.pv.front();
             last_best = best.best_move;
@@ -281,7 +283,8 @@ SearchResult Search::search_impl(Board& board, const SearchLimits& limits, std::
     return best;
 }
 
-int Search::search_root(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, Move& best_move) {
+int Search::search_root(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, Move& best_move,
+                        std::vector<std::pair<Move, int>>& root_scores) {
     TTEntry tt_entry;
     Move hash_move{};
     if (probe_tt(board.zobrist_key(), 0, tt_entry)) {
@@ -322,6 +325,21 @@ int Search::search_root(ThreadContext& ctx, Board& board, int depth, int alpha, 
     std::atomic<bool> cutoff{alpha >= beta};
     std::mutex best_mutex;
     std::vector<std::thread> workers;
+    std::vector<std::pair<Move, int>> scored_moves(moves.size());
+    std::vector<bool> evaluated(moves.size(), false);
+
+    auto finalize_scores = [&]() {
+        root_scores.clear();
+        root_scores.reserve(moves.size());
+        for (std::size_t i = 0; i < moves.size(); ++i) {
+            if (i < evaluated.size() && evaluated[i]) {
+                root_scores.push_back(scored_moves[i]);
+            }
+        }
+        std::sort(root_scores.begin(), root_scores.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.second > rhs.second;
+        });
+    };
 
     // Evaluate the first move on the calling thread to seed alpha with a good bound.
     if (!moves.empty()) {
@@ -329,11 +347,16 @@ int Search::search_root(ThreadContext& ctx, Board& board, int depth, int alpha, 
         int value = search_root_worker(ctx, board, first, depth, alpha, beta);
         best_score = value;
         best_move = first;
+        if (!scored_moves.empty()) {
+            scored_moves[0] = {first, value};
+            evaluated[0] = true;
+        }
         alpha = std::max(alpha, value);
         shared_alpha.store(alpha, std::memory_order_relaxed);
         if (value >= beta) {
             TTFlag flag = TTFlag::Beta;
             store_tt(board.zobrist_key(), depth, best_score, best_move, static_cast<std::uint8_t>(flag), 0);
+            finalize_scores();
             return best_score;
         }
     }
@@ -352,6 +375,10 @@ int Search::search_root(ThreadContext& ctx, Board& board, int depth, int alpha, 
             int value = search_root_worker(worker_ctx, board, moves[idx], depth, local_alpha, beta);
             if (stop_signal_ && stop_signal_->load()) {
                 break;
+            }
+            if (idx < scored_moves.size()) {
+                scored_moves[idx] = {moves[idx], value};
+                evaluated[idx] = true;
             }
             {
                 std::lock_guard<std::mutex> lock(best_mutex);
@@ -393,6 +420,7 @@ int Search::search_root(ThreadContext& ctx, Board& board, int depth, int alpha, 
         flag = TTFlag::Beta;
     }
     store_tt(board.zobrist_key(), depth, best_score, best_move, static_cast<std::uint8_t>(flag), 0);
+    finalize_scores();
     return best_score;
 }
 

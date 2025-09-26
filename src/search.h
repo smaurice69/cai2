@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <utility>
 #include <vector>
 
 #include "board.h"
@@ -41,6 +42,7 @@ struct SearchResult {
     int seldepth = 0;                                   /**< Maximum depth reached in the tree. */
     std::uint64_t nodes = 0;                            /**< Total nodes visited. */
     std::vector<Move> pv;                               /**< Principal variation line. */
+    std::vector<std::pair<Move, int>> root_moves;       /**< Root move candidates and scores. */
     std::chrono::milliseconds elapsed{0};               /**< Time consumed by the search. */
 };
 
@@ -121,7 +123,8 @@ class Search {
         std::vector<std::uint64_t> repetition_stack;
     };
 
-    int search_root(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, Move& best_move);
+    int search_root(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, Move& best_move,
+                    std::vector<std::pair<Move, int>>& root_scores);
     int search_root_worker(ThreadContext& ctx, Board& board, const Move& move, int depth, int alpha, int beta);
     int negamax(ThreadContext& ctx, Board& board, int depth, int alpha, int beta, bool allow_null, int ply);
     int quiescence(ThreadContext& ctx, Board& board, int alpha, int beta, int ply);
