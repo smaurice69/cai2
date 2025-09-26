@@ -1,13 +1,25 @@
 #include "training/trainer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include "bitboard.h"
 #include "nnue/evaluator.h"
@@ -17,6 +29,84 @@ namespace chiron {
 namespace {
 
 constexpr int kWeightLimit = 40000;
+
+std::filesystem::path make_unique_temp_path(const std::filesystem::path& target) {
+    namespace fs = std::filesystem;
+    auto parent = target.parent_path();
+    auto stem = target.filename().string();
+    std::ostringstream builder;
+    builder << stem << ".tmp." << std::this_thread::get_id() << '.'
+            << std::chrono::steady_clock::now().time_since_epoch().count();
+    return parent / builder.str();
+}
+
+void remove_if_exists(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+void replace_file_atomically(const std::filesystem::path& source, const std::filesystem::path& destination) {
+    namespace fs = std::filesystem;
+
+#ifdef _WIN32
+    std::wstring source_w = source.wstring();
+    std::wstring destination_w = destination.wstring();
+
+    constexpr int kMaxAttempts = 10;
+    DWORD last_error = ERROR_SUCCESS;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (MoveFileExW(source_w.c_str(), destination_w.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH | MOVEFILE_COPY_ALLOWED)) {
+            return;
+        }
+
+        last_error = GetLastError();
+        if (last_error == ERROR_SHARING_VIOLATION || last_error == ERROR_ACCESS_DENIED) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        break;
+    }
+
+    std::error_code cleanup_ec;
+    fs::remove(source, cleanup_ec);
+    throw std::system_error(static_cast<int>(last_error), std::system_category(),
+                            "MoveFileExW failed while replacing NNUE network");
+#else
+    std::error_code ec;
+    fs::rename(source, destination, ec);
+    if (!ec) {
+        return;
+    }
+
+    if (ec == std::errc::file_exists) {
+        std::error_code remove_ec;
+        fs::remove(destination, remove_ec);
+        if (!remove_ec) {
+            ec.clear();
+            fs::rename(source, destination, ec);
+            if (!ec) {
+                return;
+            }
+        }
+    }
+
+    if (ec == std::errc::cross_device_link) {
+        ec.clear();
+        fs::copy_file(source, destination, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            throw std::system_error(ec, "copy_file failed while replacing NNUE network");
+        }
+        fs::remove(source, ec);
+        if (ec) {
+            throw std::system_error(ec, "Failed to remove temporary NNUE network after copy");
+        }
+        return;
+    }
+
+    throw std::system_error(ec, "rename failed while replacing NNUE network");
+#endif
+}
 
 int clamp_weight(int value) {
     return std::clamp(value, -kWeightLimit, kWeightLimit);
@@ -68,20 +158,19 @@ void ParameterSet::load(const std::string& path) { network_.load_from_file(path)
 void ParameterSet::save(const std::string& path) const {
     namespace fs = std::filesystem;
     fs::path target(path);
-    fs::path temp = target;
-    temp += ".tmp";
 
-    network_.save_to_file(temp.string());
+    if (!target.parent_path().empty()) {
+        fs::create_directories(target.parent_path());
+    }
 
-    std::error_code ec;
-    fs::rename(temp, target, ec);
-    if (ec) {
-        fs::remove(target, ec);
-        fs::rename(temp, target, ec);
-        if (ec) {
-            fs::remove(temp);
-            throw std::runtime_error("Failed to replace NNUE network file: " + ec.message());
-        }
+    fs::path temp = make_unique_temp_path(target);
+
+    try {
+        network_.save_to_file(temp.string());
+        replace_file_atomically(temp, target);
+    } catch (...) {
+        remove_if_exists(temp);
+        throw;
     }
 }
 
