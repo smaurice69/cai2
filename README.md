@@ -76,6 +76,16 @@ Supported UCI options:
 
 The engine honours `go` parameters for depth, movetime, ponder, and all time-control fields. Searches run asynchronously; `stop` or `ponderhit` commands interrupt the current search immediately.
 
+### NNUE network format requirements
+
+If you see log lines such as `info string NNUE fallback: Invalid NNUE network file: magic mismatch`, the engine attempted to load a network whose binary header did not match the expected NNUE format and therefore fell back to the built-in material evaluator. Ensure that:
+
+* the file provided through `setoption name EvalNetwork value <path>` (or the `--training-output` option in self-play) is the raw `.nnue` binary produced by Chiron's trainer, not a compressed archive or text export;
+* the file is accessible to the engine process (no 404s when using remote paths);
+* you are not accidentally pointing to an empty placeholder file.
+
+You can regenerate a valid network at any time with `./chiron train --input <dataset> --output <network>.nnue`, which writes the correct NNUE header (`NNUE`, version 2) expected by the loader.
+
 ## Command-Line Tools
 
 The `chiron` executable also exposes a suite of helper commands:

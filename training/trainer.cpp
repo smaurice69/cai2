@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -63,7 +65,25 @@ void ParameterSet::reset(std::size_t hidden_size) { network_.load_default(hidden
 
 void ParameterSet::load(const std::string& path) { network_.load_from_file(path); }
 
-void ParameterSet::save(const std::string& path) const { network_.save_to_file(path); }
+void ParameterSet::save(const std::string& path) const {
+    namespace fs = std::filesystem;
+    fs::path target(path);
+    fs::path temp = target;
+    temp += ".tmp";
+
+    network_.save_to_file(temp.string());
+
+    std::error_code ec;
+    fs::rename(temp, target, ec);
+    if (ec) {
+        fs::remove(target, ec);
+        fs::rename(temp, target, ec);
+        if (ec) {
+            fs::remove(temp);
+            throw std::runtime_error("Failed to replace NNUE network file: " + ec.message());
+        }
+    }
+}
 
 Trainer::Trainer() : config_({}) {}
 
