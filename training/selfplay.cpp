@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <stdexcept>
 #include <ctime>
 #include <filesystem>
 #include <iostream>
@@ -279,12 +280,16 @@ std::string format_pv(Board board, const std::vector<Move>& pv) {
     return oss.str();
 }
 
+std::string trainer_device_name(TrainerDevice device) {
+    return device == TrainerDevice::kGPU ? "GPU" : "CPU";
+}
+
 }  // namespace
 
 SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
     : config_(std::move(config)),
       rng_(config_.seed != 0U ? config_.seed : static_cast<unsigned int>(std::random_device{}())),
-      trainer_(Trainer::Config{config_.training_learning_rate, 0.0005}),
+      trainer_(Trainer::Config{config_.training_learning_rate, 0.0005, config_.training_device}),
       parameters_(config_.training_hidden_size) {
     if (!config_.training_output_path.empty()) {
         std::filesystem::path output_path(config_.training_output_path);
@@ -306,6 +311,13 @@ SelfPlayOrchestrator::SelfPlayOrchestrator(SelfPlayConfig config)
             set_global_network_path(config_.training_output_path);
         }
         training_buffer_.reserve(config_.training_batch_size);
+        if (config_.teacher_chunk_size == 0) {
+            config_.teacher_chunk_size = config_.training_batch_size;
+        }
+        if (config_.teacher_mode) {
+            teacher_queue_.reserve(config_.teacher_chunk_size);
+            teacher_engine_ = std::make_unique<TeacherEngine>(config_.teacher);
+        }
         if (config_.white.network_path.empty() && !config_.training_output_path.empty() &&
             std::filesystem::exists(config_.training_output_path)) {
             config_.white.network_path = config_.training_output_path;
@@ -387,7 +399,8 @@ void SelfPlayOrchestrator::run() {
         if (config_.enable_training) {
             std::ostringstream train;
             train << "[Train] Batch size " << config_.training_batch_size << ", learning rate "
-                  << config_.training_learning_rate;
+                  << config_.training_learning_rate << ", device "
+                  << trainer_device_name(config_.training_device);
             if (!config_.training_output_path.empty()) {
                 train << ", output " << config_.training_output_path;
             } else {
@@ -395,6 +408,11 @@ void SelfPlayOrchestrator::run() {
             }
             if (!config_.training_history_dir.empty()) {
                 train << ", history " << config_.training_history_dir;
+            }
+            if (config_.teacher_mode) {
+                train << ", teacher " << (config_.teacher.engine_path.empty() ? "<none>" : config_.teacher.engine_path)
+                      << " (depth " << config_.teacher.depth << ", threads " << config_.teacher.threads
+                      << ", batch " << config_.teacher_chunk_size << ')';
             }
             train << ". Previously trained positions " << total_positions_trained_ << '.';
             log_verbose(train.str());
@@ -429,6 +447,8 @@ void SelfPlayOrchestrator::run() {
     for (auto& worker : workers) {
         worker.join();
     }
+
+    finalize_training();
 }
 
 SelfPlayResult SelfPlayOrchestrator::play_game(int game_index, const EngineConfig& white, const EngineConfig& black,
@@ -787,6 +807,50 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
         return;
     }
 
+    std::size_t added = 1 + result.fens.size();
+
+    if (config_.teacher_mode) {
+        std::vector<std::string> fen_batch;
+        {
+            std::lock_guard<std::mutex> lock(training_mutex_);
+            teacher_queue_.push_back(result.start_fen);
+            teacher_queue_.insert(teacher_queue_.end(), result.fens.begin(), result.fens.end());
+            total_positions_collected_ += added;
+
+            if (config_.verbose) {
+                std::ostringstream collect;
+                collect << "[Train] Queued " << added << " positions for teacher (queue "
+                        << teacher_queue_.size() << '/' << config_.teacher_chunk_size
+                        << ", total collected " << total_positions_collected_ << ')';
+                log_verbose(collect.str());
+            }
+
+            if (teacher_queue_.size() >= config_.teacher_chunk_size) {
+                std::size_t chunk = std::min(config_.teacher_chunk_size, teacher_queue_.size());
+                fen_batch.assign(teacher_queue_.begin(), teacher_queue_.begin() + chunk);
+                teacher_queue_.erase(teacher_queue_.begin(), teacher_queue_.begin() + chunk);
+            }
+        }
+
+        if (!fen_batch.empty()) {
+            process_teacher_batch(std::move(fen_batch), false);
+            while (true) {
+                std::vector<std::string> next_batch;
+                {
+                    std::lock_guard<std::mutex> lock(training_mutex_);
+                    if (teacher_queue_.size() < config_.teacher_chunk_size) {
+                        break;
+                    }
+                    std::size_t chunk = std::min(config_.teacher_chunk_size, teacher_queue_.size());
+                    next_batch.assign(teacher_queue_.begin(), teacher_queue_.begin() + chunk);
+                    teacher_queue_.erase(teacher_queue_.begin(), teacher_queue_.begin() + chunk);
+                }
+                process_teacher_batch(std::move(next_batch), false);
+            }
+        }
+        return;
+    }
+
     int base_target = 0;
     if (result.result == "1-0") {
         base_target = 1000;
@@ -800,7 +864,6 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
         training_buffer_.push_back({fen, orient_target_for_fen(fen, base_target)});
     }
 
-    std::size_t added = 1 + result.fens.size();
     total_positions_collected_ += added;
     if (config_.verbose) {
         std::ostringstream collect;
@@ -809,63 +872,124 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
         log_verbose(collect.str());
     }
 
-    if (training_buffer_.size() >= config_.training_batch_size) {
-        std::size_t batch = training_buffer_.size();
-        trainer_.train_batch(training_buffer_, parameters_);
-        training_buffer_.clear();
-        total_positions_trained_ += batch;
-        ++training_iteration_;
+    train_buffer_if_ready_locked(false);
+}
 
-        std::string updated_network_path;
-        std::string snapshot_path;
-        if (!config_.training_output_path.empty()) {
-            std::filesystem::path output_path(config_.training_output_path);
-            if (output_path.has_parent_path()) {
-                std::filesystem::create_directories(output_path.parent_path());
-            }
-            parameters_.save(output_path.string());
-            set_global_network_path(output_path.string());
-            {
-                std::lock_guard<std::mutex> config_lock(config_mutex_);
-                config_.white.network_path = output_path.string();
-                config_.black.network_path = output_path.string();
-            }
 
-          
-            updated_network_path = output_path.string();
+void SelfPlayOrchestrator::train_buffer_if_ready_locked(bool force) {
+    if (training_buffer_.empty()) {
+        return;
+    }
+    if (!force && training_buffer_.size() < config_.training_batch_size) {
+        return;
+    }
 
-            if (!config_.training_history_dir.empty()) {
-                std::filesystem::path history_dir(config_.training_history_dir);
-                std::filesystem::create_directories(history_dir);
-                std::ostringstream name;
-                name << training_history_prefix_ << "-iter" << std::setw(6) << std::setfill('0')
-                     << training_iteration_;
-                std::filesystem::path snapshot = history_dir / (name.str() + training_history_extension_);
-                parameters_.save(snapshot.string());
+    std::size_t batch = training_buffer_.size();
+    trainer_.train_batch(training_buffer_, parameters_);
+    training_buffer_.clear();
+    total_positions_trained_ += batch;
+    ++training_iteration_;
 
-              
-                snapshot_path = snapshot.string();
-            }
+    std::string updated_network_path;
+    std::string snapshot_path;
+    if (!config_.training_output_path.empty()) {
+        std::filesystem::path output_path(config_.training_output_path);
+        if (output_path.has_parent_path()) {
+            std::filesystem::create_directories(output_path.parent_path());
+        }
+        parameters_.save(output_path.string());
+        set_global_network_path(output_path.string());
+        {
+            std::lock_guard<std::mutex> config_lock(config_mutex_);
+            config_.white.network_path = output_path.string();
+            config_.black.network_path = output_path.string();
         }
 
-        if (config_.verbose) {
-            std::ostringstream train_msg;
-            train_msg << "[Train] Iteration " << training_iteration_ << " trained on " << batch
-                      << " positions (total trained " << total_positions_trained_ << ')';
-            if (!updated_network_path.empty()) {
-                train_msg << ". Updated network: " << updated_network_path;
-            } else {
-                train_msg << ". Updated in-memory weights (no output path).";
-            }
-            log_verbose(train_msg.str());
-            if (!snapshot_path.empty()) {
-                std::ostringstream snapshot_msg;
-                snapshot_msg << "[Train] Snapshot saved to " << snapshot_path;
-                log_verbose(snapshot_msg.str());
-            }
+        updated_network_path = output_path.string();
+
+        if (!config_.training_history_dir.empty()) {
+            std::filesystem::path history_dir(config_.training_history_dir);
+            std::filesystem::create_directories(history_dir);
+            std::ostringstream name;
+            name << training_history_prefix_ << "-iter" << std::setw(6) << std::setfill('0')
+                 << training_iteration_;
+            std::filesystem::path snapshot = history_dir / (name.str() + training_history_extension_);
+            parameters_.save(snapshot.string());
+            snapshot_path = snapshot.string();
         }
     }
+
+    if (config_.verbose) {
+        std::ostringstream train_msg;
+        train_msg << "[Train] Iteration " << training_iteration_ << " trained on " << batch
+                  << " positions (total trained " << total_positions_trained_ << ')';
+        if (!updated_network_path.empty()) {
+            train_msg << ". Updated network: " << updated_network_path;
+        } else {
+            train_msg << ". Updated in-memory weights (no output path).";
+        }
+        if (!snapshot_path.empty()) {
+            train_msg << " Snapshot saved to " << snapshot_path << '.';
+        }
+        log_verbose(train_msg.str());
+    }
 }
+
+void SelfPlayOrchestrator::process_teacher_batch(std::vector<std::string> fen_batch, bool force) {
+    if (!teacher_engine_ || fen_batch.empty()) {
+        return;
+    }
+    std::vector<int> scores = teacher_engine_->evaluate(fen_batch);
+    if (scores.size() != fen_batch.size()) {
+        throw std::runtime_error("Teacher engine returned an unexpected number of evaluations");
+    }
+
+    std::lock_guard<std::mutex> lock(training_mutex_);
+    for (std::size_t i = 0; i < fen_batch.size(); ++i) {
+        training_buffer_.push_back({std::move(fen_batch[i]), scores[i]});
+    }
+
+    if (config_.verbose) {
+        std::ostringstream collect;
+        collect << "[Train] Teacher labelled " << scores.size() << " positions (buffer "
+                << training_buffer_.size() << '/' << config_.training_batch_size
+                << ", total collected " << total_positions_collected_ << ')';
+        log_verbose(collect.str());
+    }
+
+    train_buffer_if_ready_locked(force);
+}
+
+void SelfPlayOrchestrator::finalize_training() {
+    if (!config_.enable_training) {
+        return;
+    }
+
+    if (config_.teacher_mode && teacher_engine_) {
+        while (true) {
+            std::vector<std::string> fen_batch;
+            bool queue_empty = false;
+            {
+                std::lock_guard<std::mutex> lock(training_mutex_);
+                if (teacher_queue_.empty()) {
+                    break;
+                }
+                std::size_t chunk = std::min(config_.teacher_chunk_size, teacher_queue_.size());
+                fen_batch.assign(teacher_queue_.begin(), teacher_queue_.begin() + chunk);
+                teacher_queue_.erase(teacher_queue_.begin(), teacher_queue_.begin() + chunk);
+                queue_empty = teacher_queue_.empty();
+            }
+            process_teacher_batch(std::move(fen_batch), queue_empty);
+        }
+        std::lock_guard<std::mutex> lock(training_mutex_);
+        train_buffer_if_ready_locked(true);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(training_mutex_);
+    train_buffer_if_ready_locked(true);
+}
+
 
 void SelfPlayOrchestrator::log_verbose(const std::string& message) {
     if (!config_.verbose) {

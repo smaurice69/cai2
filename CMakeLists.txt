@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(CHIRON_ENABLE_CUDA "Enable CUDA acceleration for NNUE training" OFF)
+
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
 endif()
@@ -28,6 +30,7 @@ add_library(chiron_lib
     nnue/evaluator.cpp
     training/selfplay.cpp
     training/trainer.cpp
+    training/gpu_backend.cpp
     training/pgn_importer.cpp
     tools/tuning.cpp
     tools/teacher.cpp
@@ -54,6 +57,17 @@ endif()
 add_executable(chiron src/main.cpp)
 target_link_libraries(chiron PRIVATE chiron_lib)
 
+if (CHIRON_ENABLE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    set(CMAKE_CUDA_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    target_sources(chiron_lib PRIVATE training/trainer_cuda.cu)
+    target_compile_definitions(chiron_lib PRIVATE CHIRON_ENABLE_CUDA)
+    target_link_libraries(chiron_lib PRIVATE CUDA::cudart)
+    set_target_properties(chiron_lib PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+endif()
+
 include(FetchContent)
 FetchContent_Declare(
     googletest
@@ -68,6 +82,7 @@ add_executable(chiron_tests
     tests/test_nnue.cpp
     tests/test_selfplay.cpp
     tests/test_training.cpp
+    tests/test_evaluation.cpp
 )
 target_link_libraries(chiron_tests PRIVATE chiron_lib GTest::gtest_main)
 

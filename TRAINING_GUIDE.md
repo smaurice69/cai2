@@ -107,6 +107,21 @@ Stockfish offers world-class evaluation quality and can dramatically improve Chi
    * Use `--depth` or `--nodes` to control runtime. Node limits yield consistent throughput on mixed hardware.
    * Add `--multipv 2` (or higher) if you want the teacher to report multiple candidate moves per position.
 
+   Alternatively, skip the intermediate label files and let Chiron handle the full loop:
+
+   ```bash
+   ./build/chiron train-teacher \
+     --teacher ./tools/stockfish \
+     --games 500000 \
+     --depth 18 \
+     --search-depth 10 \
+     --batch 2048 \
+     --teacher-batch 512 \
+     --output nnue/models/chiron-teacher-latest.nnue
+   ```
+
+   The `train-teacher` command plays fresh self-play games, sends each FEN to Stockfish for a centipawn label, and immediately updates the NNUE network. Add `--verboselite` for lightweight per-game progress (or `--verbose` for full move logs). Include `--device gpu` if you compiled with CUDA support to train on your GPU.
+
 5. **Record teacher metadata**
    Save the Stockfish version and benchmark inside a sidecar file so you can reproduce results later:
    ```bash

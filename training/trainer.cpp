@@ -23,12 +23,11 @@
 
 #include "bitboard.h"
 #include "nnue/evaluator.h"
+#include "training/gpu_backend.h"
 
 namespace chiron {
 
 namespace {
-
-constexpr int kWeightLimit = 40000;
 
 std::filesystem::path make_unique_temp_path(const std::filesystem::path& target) {
     namespace fs = std::filesystem;
@@ -109,7 +108,7 @@ void replace_file_atomically(const std::filesystem::path& source, const std::fil
 }
 
 int clamp_weight(int value) {
-    return std::clamp(value, -kWeightLimit, kWeightLimit);
+    return std::clamp(value, -kTrainerWeightLimit, kTrainerWeightLimit);
 }
 
 int evaluate_with_network(const Board& board, const nnue::Network& network) {
@@ -145,6 +144,115 @@ int evaluate_with_network(const Board& board, const nnue::Network& network) {
     int eval = static_cast<int>(std::llround(scaled));
     eval = std::clamp(eval, -nnue::kMaxEvaluationMagnitude, nnue::kMaxEvaluationMagnitude);
     return board.side_to_move() == Color::White ? eval : -eval;
+}
+
+void train_batch_cpu(const std::vector<TrainingExample>& batch, nnue::Network& net,
+                     const Trainer::Config& config) {
+    std::size_t hidden = net.hidden_size();
+    std::vector<std::size_t> white_features;
+    std::vector<std::size_t> black_features;
+    white_features.reserve(32);
+    black_features.reserve(32);
+    std::vector<int32_t> white_accum(hidden);
+    std::vector<int32_t> black_accum(hidden);
+    std::vector<double> activations(hidden);
+    std::vector<double> activation_derivatives(hidden);
+
+    for (const TrainingExample& example : batch) {
+        Board board;
+        board.set_from_fen(example.fen);
+
+        white_features.clear();
+        black_features.clear();
+        for (int color = 0; color < kNumColors; ++color) {
+            for (int piece = 0; piece < kNumPieceTypes; ++piece) {
+                Bitboard bb = board.pieces(static_cast<Color>(color), static_cast<PieceType>(piece));
+                while (bb) {
+                    int square = pop_lsb(bb);
+                    std::size_t feature =
+                        nnue::feature_index(static_cast<Color>(color), static_cast<PieceType>(piece), square);
+                    if (color == static_cast<int>(Color::White)) {
+                        white_features.push_back(feature);
+                    } else {
+                        black_features.push_back(feature);
+                    }
+                }
+            }
+        }
+
+        std::fill(white_accum.begin(), white_accum.end(), 0);
+        std::fill(black_accum.begin(), black_accum.end(), 0);
+        for (std::size_t feature : white_features) {
+            for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+                white_accum[neuron] += net.input_weight(feature, neuron);
+            }
+        }
+        for (std::size_t feature : black_features) {
+            for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+                black_accum[neuron] += net.input_weight(feature, neuron);
+            }
+        }
+
+        double raw = static_cast<double>(net.bias());
+        for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+            int32_t pre = white_accum[neuron] - black_accum[neuron] + net.hidden_bias(neuron);
+            double normalized = static_cast<double>(pre) / nnue::kActivationScale;
+            double tanh_val = std::tanh(normalized);
+            activations[neuron] = tanh_val * nnue::kActivationScale;
+            activation_derivatives[neuron] = 1.0 - tanh_val * tanh_val;
+            raw += activations[neuron] * static_cast<double>(net.output_weight(neuron));
+        }
+
+        double orientation = (board.side_to_move() == Color::White) ? 1.0 : -1.0;
+        double predicted_cp = orientation * raw * static_cast<double>(net.scale());
+        double error = static_cast<double>(example.target_cp) - predicted_cp;
+        double lr_error = config.learning_rate * error * orientation * static_cast<double>(net.scale());
+
+        double bias_current = static_cast<double>(net.bias());
+        double bias_next = bias_current + lr_error;
+        if (config.regularisation > 0.0) {
+            bias_next -= config.regularisation * bias_current;
+        }
+        net.set_bias(clamp_weight(static_cast<int>(std::llround(bias_next))));
+
+        for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
+            double output_current = static_cast<double>(net.output_weight(neuron));
+            double output_next = output_current + lr_error * activations[neuron];
+            if (config.regularisation > 0.0) {
+                output_next -= config.regularisation * output_current;
+            }
+            net.set_output_weight(neuron, static_cast<float>(output_next));
+
+            double grad_pre = lr_error * output_current * activation_derivatives[neuron];
+            int32_t hidden_bias_current = net.hidden_bias(neuron);
+            double hidden_next = static_cast<double>(hidden_bias_current) + grad_pre;
+            if (config.regularisation > 0.0) {
+                hidden_next -= config.regularisation * static_cast<double>(hidden_bias_current);
+            }
+            net.set_hidden_bias(neuron, clamp_weight(static_cast<int>(std::llround(hidden_next))));
+
+            if (std::abs(grad_pre) < 1e-12) {
+                continue;
+            }
+
+            for (std::size_t feature : white_features) {
+                int32_t current = net.input_weight(feature, neuron);
+                double next = static_cast<double>(current) + grad_pre;
+                if (config.regularisation > 0.0) {
+                    next -= config.regularisation * static_cast<double>(current);
+                }
+                net.set_input_weight(feature, neuron, clamp_weight(static_cast<int>(std::llround(next))));
+            }
+            for (std::size_t feature : black_features) {
+                int32_t current = net.input_weight(feature, neuron);
+                double next = static_cast<double>(current) - grad_pre;
+                if (config.regularisation > 0.0) {
+                    next -= config.regularisation * static_cast<double>(current);
+                }
+                net.set_input_weight(feature, neuron, clamp_weight(static_cast<int>(std::llround(next))));
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -189,114 +297,18 @@ void Trainer::train_batch(const std::vector<TrainingExample>& batch, ParameterSe
         return;
     }
 
-    nnue::Network& net = parameters.network();
-    std::size_t hidden = net.hidden_size();
-    std::vector<std::size_t> white_features;
-    std::vector<std::size_t> black_features;
-    white_features.reserve(32);
-    black_features.reserve(32);
-    std::vector<int32_t> white_accum(hidden);
-    std::vector<int32_t> black_accum(hidden);
-    std::vector<double> activations(hidden);
-    std::vector<double> activation_derivatives(hidden);
-
-    for (const TrainingExample& example : batch) {
-        Board board;
-        board.set_from_fen(example.fen);
-
-        white_features.clear();
-        black_features.clear();
-        for (int color = 0; color < kNumColors; ++color) {
-            for (int piece = 0; piece < kNumPieceTypes; ++piece) {
-                Bitboard bb = board.pieces(static_cast<Color>(color), static_cast<PieceType>(piece));
-                while (bb) {
-                    int square = pop_lsb(bb);
-                    std::size_t feature = nnue::feature_index(static_cast<Color>(color), static_cast<PieceType>(piece), square);
-                    if (color == static_cast<int>(Color::White)) {
-                        white_features.push_back(feature);
-                    } else {
-                        black_features.push_back(feature);
-                    }
-                }
-            }
+    if (config_.device == TrainerDevice::kGPU) {
+        if (!gpu::is_available()) {
+            throw std::runtime_error(
+                "GPU training requested but CUDA support was not enabled when building Chiron");
         }
-
-        std::fill(white_accum.begin(), white_accum.end(), 0);
-        std::fill(black_accum.begin(), black_accum.end(), 0);
-        for (std::size_t feature : white_features) {
-            for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
-                white_accum[neuron] += net.input_weight(feature, neuron);
-            }
-        }
-        for (std::size_t feature : black_features) {
-            for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
-                black_accum[neuron] += net.input_weight(feature, neuron);
-            }
-        }
-
-        double raw = static_cast<double>(net.bias());
-        for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
-            int32_t pre = white_accum[neuron] - black_accum[neuron] + net.hidden_bias(neuron);
-            double normalized = static_cast<double>(pre) / nnue::kActivationScale;
-            double tanh_val = std::tanh(normalized);
-            activations[neuron] = tanh_val * nnue::kActivationScale;
-            activation_derivatives[neuron] = 1.0 - tanh_val * tanh_val;
-            raw += activations[neuron] * static_cast<double>(net.output_weight(neuron));
-        }
-
-        double orientation = (board.side_to_move() == Color::White) ? 1.0 : -1.0;
-        double predicted_cp = orientation * raw * static_cast<double>(net.scale());
-        double error = static_cast<double>(example.target_cp) - predicted_cp;
-        double lr_error = config_.learning_rate * error * orientation * static_cast<double>(net.scale());
-
-        double bias_current = static_cast<double>(net.bias());
-        double bias_next = bias_current + lr_error;
-        if (config_.regularisation > 0.0) {
-            bias_next -= config_.regularisation * bias_current;
-        }
-        net.set_bias(clamp_weight(static_cast<int>(std::llround(bias_next))));
-
-        for (std::size_t neuron = 0; neuron < hidden; ++neuron) {
-            double output_current = static_cast<double>(net.output_weight(neuron));
-            double output_next = output_current + lr_error * activations[neuron];
-            if (config_.regularisation > 0.0) {
-                output_next -= config_.regularisation * output_current;
-            }
-            net.set_output_weight(neuron, static_cast<float>(output_next));
-
-            double grad_pre = lr_error * output_current * activation_derivatives[neuron];
-            int32_t hidden_bias_current = net.hidden_bias(neuron);
-            double hidden_next = static_cast<double>(hidden_bias_current) + grad_pre;
-            if (config_.regularisation > 0.0) {
-                hidden_next -= config_.regularisation * static_cast<double>(hidden_bias_current);
-            }
-            net.set_hidden_bias(neuron, clamp_weight(static_cast<int>(std::llround(hidden_next))));
-
-            if (std::abs(grad_pre) < 1e-12) {
-                continue;
-            }
-
-            for (std::size_t feature : white_features) {
-                int32_t current = net.input_weight(feature, neuron);
-                double next = static_cast<double>(current) + grad_pre;
-                if (config_.regularisation > 0.0) {
-                    next -= config_.regularisation * static_cast<double>(current);
-                }
-                net.set_input_weight(feature, neuron,
-                                     clamp_weight(static_cast<int>(std::llround(next))));
-            }
-            for (std::size_t feature : black_features) {
-                int32_t current = net.input_weight(feature, neuron);
-                double next = static_cast<double>(current) - grad_pre;
-                if (config_.regularisation > 0.0) {
-                    next -= config_.regularisation * static_cast<double>(current);
-                }
-                net.set_input_weight(feature, neuron,
-                                     clamp_weight(static_cast<int>(std::llround(next))));
-            }
-        }
+        gpu::train_batch(batch, parameters.network(), config_);
+        return;
     }
+
+    train_batch_cpu(batch, parameters.network(), config_);
 }
+
 
 std::vector<TrainingExample> load_training_file(const std::string& path) {
     std::ifstream stream(path);

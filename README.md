@@ -48,11 +48,35 @@ ninja -C build
 
 These presets work seamlessly inside VS Code's integrated terminal on macOS.
 
+#### Optional GPU training (CUDA)
+
+To accelerate NNUE optimisation on NVIDIA GPUs, install the CUDA Toolkit (11.8 or newer is recommended) and configure CMake with `-DCHIRON_ENABLE_CUDA=ON`:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCHIRON_ENABLE_CUDA=ON
+cmake --build build --config Release
+```
+
+On Windows the Visual Studio generator works as well:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCHIRON_ENABLE_CUDA=ON
+cmake --build build --config Release
+```
+
+Once built with CUDA support you can select the GPU backend at runtime via `--device gpu` in `train`, `selfplay --enable-training`, or `train-teacher`. Systems without CUDA fall back to the default CPU trainer automatically.
+
 ### Running Tests
 
 ```bash
 cmake --build build --target chiron_tests
 ctest --test-dir build
+```
+
+To focus on the evaluation pipeline checks alone, run:
+
+```bash
+ctest --test-dir build --tests-regex Evaluation
 ```
 
 ## UCI Usage
@@ -95,6 +119,7 @@ The `chiron` executable also exposes a suite of helper commands:
 | `perft --depth N [--fen FEN]` | Executes a perft test from the current position. |
 | `selfplay [options]` | Runs concurrent self-play games (see below). |
 | `train --input dataset.txt [--output net.nnue] [--rate 0.05] [--batch 256] [--iterations 3] [--shuffle]` | Trains the evaluator on a dataset of `fen|score` lines. |
+| `train-teacher --teacher /path/to/stockfish [--games 1M] [--depth 15] [--batch 2048] [--teacher-batch 512] [--device gpu]` | Runs Stockfish-supervised training that streams labelled positions directly into the NNUE trainer. |
 | `import-pgn --pgn games.pgn [--output dataset.txt] [--no-draws]` | Converts a PGN database into a training dataset. |
 | `teacher --engine /path/to/uci --positions fens.txt [--output labels.txt] [--depth 20] [--threads 4]` | Calls an external UCI engine to annotate positions with evaluations. |
 | `tune sprt ...` / `tune time ...` | Existing tuning utilities for SPRT matches and time-heuristic analysis. |
@@ -161,6 +186,42 @@ Enable `--verbose` to monitor self-play in real time. Each move is reported with
 
 By default the latest self-play network is written to `nnue/models/chiron-selfplay-latest.nnue`. Each optimisation step also writes a snapshot to `nnue/models/history/<prefix>-iterXXXX.nnue`. Both paths are configurable via `--training-output` and `--training-history`, and required directories are created automatically on Windows, macOS, and Linux.
 
+### Stockfish Teacher Training
+
+Chiron now exposes a single command that launches Stockfish (or any other UCI "teacher"), samples fresh self-play games, requests centipawn targets from the teacher, and streams them into the NNUE trainer.
+
+**Linux/macOS example**
+
+```bash
+./build/chiron train-teacher \
+  --teacher /opt/engines/stockfish \
+  --games 1M \
+  --depth 15 \
+  --search-depth 10 \
+  --concurrency 8 \
+  --batch 2048 \
+  --teacher-batch 512 \
+  --output nnue/models/chiron-teacher-latest.nnue \
+  --history nnue/models/teacher-history
+```
+
+**Windows example**
+
+```powershell
+chiron.exe train-teacher `
+  --teacher "C:\\Engines\\stockfish.exe" `
+  --games 1M `
+  --depth 15 `
+  --search-depth 10 `
+  --concurrency 8 `
+  --batch 2048 `
+  --teacher-batch 512 `
+  --output nnue\\models\\chiron-teacher-latest.nnue `
+  --history nnue\\models\\teacher-history
+```
+
+The `--search-depth` flag controls how deeply Chiron explores each self-play move while the teacher depth governs Stockfish's evaluation quality. `--teacher-batch` limits how many FENs are sent to the teacher in one go (keeping the UCI pipe responsive), while `--batch` determines the optimiser's batch size. The command inherits all self-play options such as `--concurrency`, `--table-size`, and network overrides. Add `--verboselite` to emit a concise per-game summary (or `--verbose` for full telemetry). Combine it with `--device gpu` (see below) to train on a CUDA-enabled system.
+
 ## Dataset & Teacher Workflow
 
 1. **Generate positions** – Run self-play with `--record-fens` or import existing PGNs with `import-pgn`.
@@ -176,7 +237,7 @@ By default the latest self-play network is written to `nnue/models/chiron-selfpl
 
 ## Testing & Verification
 
-Automated GoogleTest suites cover move generation (perft depth 1–6), self-play stability, and training save/load round-trips. Run them via `ctest` as shown above.
+Automated GoogleTest suites cover move generation (perft depth 1–6), self-play stability, Stockfish labelling, evaluation sanity checks, and training save/load round-trips. Run them via `ctest` as shown above.
 
 ## License
 

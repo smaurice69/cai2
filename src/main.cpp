@@ -1,11 +1,13 @@
 #include "uci.h"
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -26,6 +28,7 @@ using chiron::ParameterSet;
 using chiron::PgnImporter;
 using chiron::TeacherEngine;
 using chiron::Trainer;
+using chiron::TrainerDevice;
 using chiron::TrainingExample;
 using chiron::load_training_file;
 using chiron::perft;
@@ -54,15 +57,79 @@ double parse_double(const std::vector<std::string>& args, std::size_t& index, co
     }
 }
 
+std::uint64_t parse_size_literal(const std::string& value);
+
 std::size_t parse_size(const std::vector<std::string>& args, std::size_t& index, const std::string& option) {
     if (index + 1 >= args.size()) {
         throw std::invalid_argument(option + " requires a value");
     }
     try {
-        return static_cast<std::size_t>(std::stoll(args[++index]));
+        return static_cast<std::size_t>(parse_size_literal(args[++index]));
     } catch (const std::exception&) {
         throw std::invalid_argument("Invalid size for " + option);
     }
+}
+
+std::uint64_t parse_size_literal(const std::string& value) {
+    if (value.empty()) {
+        throw std::invalid_argument("Empty numeric literal");
+    }
+    std::string sanitized;
+    sanitized.reserve(value.size());
+    for (char c : value) {
+        if (c == '_') {
+            continue;
+        }
+        sanitized.push_back(c);
+    }
+    if (sanitized.empty()) {
+        throw std::invalid_argument("Empty numeric literal");
+    }
+
+    char suffix = '\0';
+    if (std::isalpha(static_cast<unsigned char>(sanitized.back()))) {
+        suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(sanitized.back())));
+        sanitized.pop_back();
+    }
+    if (sanitized.empty()) {
+        throw std::invalid_argument("Numeric literal missing digits");
+    }
+
+    std::uint64_t base = std::stoull(sanitized);
+    std::uint64_t multiplier = 1ULL;
+    switch (suffix) {
+        case '\0':
+            break;
+        case 'k':
+            multiplier = 1000ULL;
+            break;
+        case 'm':
+            multiplier = 1000ULL * 1000ULL;
+            break;
+        case 'g':
+        case 'b':
+            multiplier = 1000ULL * 1000ULL * 1000ULL;
+            break;
+        case 't':
+            multiplier = 1000ULL * 1000ULL * 1000ULL * 1000ULL;
+            break;
+        default:
+            throw std::invalid_argument("Unsupported size suffix in " + value);
+    }
+    return base * multiplier;
+}
+
+TrainerDevice parse_trainer_device_option(const std::string& value) {
+    std::string lowered = value;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowered == "cpu") {
+        return TrainerDevice::kCPU;
+    }
+    if (lowered == "gpu") {
+        return TrainerDevice::kGPU;
+    }
+    throw std::invalid_argument("Unknown training device: " + value);
 }
 
 int run_perft(const std::vector<std::string>& args) {
@@ -170,6 +237,9 @@ int run_selfplay(const std::vector<std::string>& args) {
             config.training_batch_size = parse_size(args, i, opt);
         } else if (opt == "--training-rate") {
             config.training_learning_rate = parse_double(args, i, opt);
+        } else if (opt == "--training-device") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.training_device = parse_trainer_device_option(args[++i]);
         } else if (opt == "--training-output") {
             if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
             config.training_output_path = args[++i];
@@ -326,6 +396,7 @@ int run_train_command(const std::vector<std::string>& args) {
     std::size_t hidden_size = kDefaultHiddenSize;
     int iterations = 1;
     bool shuffle = false;
+    TrainerDevice trainer_device = TrainerDevice::kCPU;
 
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& opt = args[i];
@@ -345,6 +416,9 @@ int run_train_command(const std::vector<std::string>& args) {
             shuffle = true;
         } else if (opt == "--hidden") {
             hidden_size = parse_size(args, i, opt);
+        } else if (opt == "--device") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--device requires a value");
+            trainer_device = parse_trainer_device_option(args[++i]);
         }
     }
 
@@ -367,7 +441,7 @@ int run_train_command(const std::vector<std::string>& args) {
         parameters.load(output_path);
     }
 
-    Trainer trainer({learning_rate, 0.0005});
+    Trainer trainer(Trainer::Config{learning_rate, 0.0005, trainer_device});
     for (int iteration = 0; iteration < iterations; ++iteration) {
         for (std::size_t offset = 0; offset < data.size(); offset += batch_size) {
             std::size_t end = std::min(offset + batch_size, data.size());
@@ -380,6 +454,127 @@ int run_train_command(const std::vector<std::string>& args) {
     if (!output_path.empty()) {
         parameters.save(output_path);
     }
+    return 0;
+}
+
+int run_train_teacher_command(const std::vector<std::string>& args) {
+    chiron::SelfPlayConfig config;
+    config.games = 1000;
+    config.enable_training = true;
+    config.teacher_mode = true;
+    config.capture_results = false;
+    config.capture_pgn = false;
+    config.append_logs = false;
+    config.white.name = "Chiron-Teacher";
+    config.black.name = "Chiron-Teacher";
+    config.white.max_depth = 8;
+    config.black.max_depth = 8;
+    config.white.threads = 1;
+    config.black.threads = 1;
+    config.training_batch_size = 2048;
+    config.training_learning_rate = 0.02;
+    config.training_output_path = "nnue/models/chiron-teacher-latest.nnue";
+    config.training_history_dir = "nnue/models/teacher-history";
+    config.training_hidden_size = kDefaultHiddenSize;
+    config.training_device = TrainerDevice::kCPU;
+    config.teacher.depth = 15;
+    config.teacher.threads = 1;
+    config.teacher_chunk_size = 512;
+
+    bool teacher_set = false;
+
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& opt = args[i];
+        if (opt == "--teacher") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--teacher requires a path to a UCI engine");
+            config.teacher.engine_path = args[++i];
+            teacher_set = true;
+        } else if (opt == "--depth" || opt == "--teacher-depth") {
+            config.teacher.depth = parse_int(args, i, opt);
+        } else if (opt == "--teacher-threads" || opt == "--threads") {
+            config.teacher.threads = parse_int(args, i, opt);
+        } else if (opt == "--games") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--games requires a value");
+            std::uint64_t count = parse_size_literal(args[++i]);
+            if (count == 0 || count > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+                throw std::invalid_argument("--games value out of range");
+            }
+            config.games = static_cast<int>(count);
+        } else if (opt == "--concurrency") {
+            config.concurrency = std::max(1, parse_int(args, i, opt));
+        } else if (opt == "--search-depth" || opt == "--selfplay-depth") {
+            int depth = parse_int(args, i, opt);
+            config.white.max_depth = depth;
+            config.black.max_depth = depth;
+        } else if (opt == "--search-threads" || opt == "--selfplay-threads") {
+            int threads = parse_int(args, i, opt);
+            config.white.threads = threads;
+            config.black.threads = threads;
+        } else if (opt == "--table-size") {
+            std::size_t size = parse_size(args, i, opt);
+            config.white.table_size = size;
+            config.black.table_size = size;
+        } else if (opt == "--batch") {
+            config.training_batch_size = parse_size(args, i, opt);
+        } else if (opt == "--teacher-batch") {
+            config.teacher_chunk_size = parse_size(args, i, opt);
+        } else if (opt == "--verbose") {
+            config.verbose = true;
+        } else if (opt == "--verboselite") {
+            config.verbose_lite = true;
+        } else if (opt == "--learning-rate") {
+            config.training_learning_rate = parse_double(args, i, opt);
+        } else if (opt == "--output") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--output requires a path");
+            config.training_output_path = args[++i];
+        } else if (opt == "--history") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--history requires a directory");
+            config.training_history_dir = args[++i];
+        } else if (opt == "--hidden") {
+            config.training_hidden_size = parse_size(args, i, opt);
+        } else if (opt == "--device") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--device requires a value");
+            config.training_device = parse_trainer_device_option(args[++i]);
+        } else if (opt == "--max-ply") {
+            config.max_ply = parse_int(args, i, opt);
+        } else if (opt == "--seed") {
+            config.seed = static_cast<unsigned int>(parse_int(args, i, opt));
+        } else if (opt == "--network") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--network requires a path");
+            std::string net = args[++i];
+            config.white.network_path = net;
+            config.black.network_path = net;
+        } else if (opt == "--white-network") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--white-network requires a path");
+            config.white.network_path = args[++i];
+        } else if (opt == "--black-network") {
+            if (i + 1 >= args.size()) throw std::invalid_argument("--black-network requires a path");
+            config.black.network_path = args[++i];
+        } else if (opt == "--randomness-temperature") {
+            config.randomness_temperature = parse_double(args, i, opt);
+        } else if (opt == "--randomness-top-moves") {
+            config.randomness_top_moves = parse_int(args, i, opt);
+        } else if (opt == "--randomness-score-margin") {
+            config.randomness_score_margin = parse_int(args, i, opt);
+        } else if (opt == "--randomness-max-ply") {
+            config.randomness_max_ply = parse_int(args, i, opt);
+        } else {
+            throw std::invalid_argument("Unknown train-teacher option: " + opt);
+        }
+    }
+
+    if (!teacher_set || config.teacher.engine_path.empty()) {
+        throw std::invalid_argument("train-teacher requires --teacher pointing to a Stockfish (or other UCI) binary");
+    }
+    if (config.teacher.depth <= 0) {
+        throw std::invalid_argument("Teacher depth must be positive");
+    }
+    if (config.teacher_chunk_size == 0) {
+        throw std::invalid_argument("Teacher batch size must be positive");
+    }
+
+    chiron::SelfPlayOrchestrator orchestrator(config);
+    orchestrator.run();
     return 0;
 }
 
@@ -490,6 +685,9 @@ int main(int argc, char** argv) {
         }
         if (command == "train") {
             return run_train_command(args);
+        }
+        if (command == "train-teacher") {
+            return run_train_teacher_command(args);
         }
         if (command == "import-pgn") {
             return run_import_pgn(args);
