@@ -29,6 +29,7 @@ add_library(chiron_lib
     nnue/network.cpp
     nnue/evaluator.cpp
     training/selfplay.cpp
+    training/elo_tracker.cpp
     training/trainer.cpp
     training/gpu_backend.cpp
     training/pgn_importer.cpp
