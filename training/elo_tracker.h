@@ -53,6 +53,7 @@ class EloTracker {
         int draws = 0;
         int losses = 0;
         double score = 0.0;
+        std::string display_name;
     };
 
     double initial_rating_;
