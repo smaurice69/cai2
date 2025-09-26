@@ -158,6 +158,7 @@ void ParameterSet::load(const std::string& path) { network_.load_from_file(path)
 void ParameterSet::save(const std::string& path) const {
     namespace fs = std::filesystem;
     fs::path target(path);
+
     if (!target.parent_path().empty()) {
         fs::create_directories(target.parent_path());
     }
