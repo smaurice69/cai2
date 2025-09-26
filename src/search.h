@@ -18,6 +18,8 @@
 
 namespace chiron {
 
+class SearchTestHelper;
+
 /**
  * @brief Search parameters derived from a UCI go command or self-play configuration.
  */
@@ -146,6 +148,8 @@ class Search {
     void reset_context(ThreadContext& ctx);
     static void atomic_max(std::atomic<int>& target, int value);
 
+    friend class SearchTestHelper;
+
     std::vector<TTEntry> table_;
     std::shared_ptr<nnue::Evaluator> evaluator_;
     TimeManager time_manager_{};
@@ -161,6 +165,11 @@ class Search {
     mutable std::shared_mutex tt_mutex_;
     std::atomic<std::uint64_t> nodes_total_{0};
     std::atomic<int> seldepth_total_{0};
+};
+
+class SearchTestHelper {
+   public:
+    static int negamax_entry(Search& search, Board& board, int depth, int alpha, int beta);
 };
 
 }  // namespace chiron

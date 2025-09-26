@@ -493,6 +493,7 @@ int Search::negamax(ThreadContext& ctx, Board& board, int depth, int alpha, int 
     int alpha_original = alpha;
 
     if (!in_check && allow_null && depth >= 3 && static_eval >= beta) {
+        ctx.accumulator_stack[ply + 1] = ctx.accumulator_stack[ply];
         Board::State state;
         board.make_null_move(state);
         ctx.repetition_stack.push_back(board.zobrist_key());
@@ -804,6 +805,32 @@ void Search::atomic_max(std::atomic<int>& target, int value) {
     while (current < value &&
            !target.compare_exchange_weak(current, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
     }
+}
+
+int SearchTestHelper::negamax_entry(Search& search, Board& board, int depth, int alpha, int beta) {
+    search.stop_signal_ = nullptr;
+    search.node_limit_ = 0;
+    search.time_limit_ = std::chrono::milliseconds{0};
+    search.start_time_ = std::chrono::steady_clock::now();
+    search.nodes_total_.store(0, std::memory_order_relaxed);
+    search.seldepth_total_.store(0, std::memory_order_relaxed);
+
+    if (!search.evaluator_) {
+        search.evaluator_ = global_evaluator();
+    }
+    search.evaluator_->ensure_network_loaded();
+
+    if (search.contexts_.empty()) {
+        search.contexts_.resize(1);
+    }
+
+    Search::ThreadContext& ctx = search.contexts_.front();
+    search.ensure_context_capacity(ctx, depth + 5);
+    search.reset_context(ctx);
+    ctx.repetition_stack.push_back(board.zobrist_key());
+    search.evaluator_->build_accumulator(board, ctx.accumulator_stack[0]);
+
+    return search.negamax(ctx, board, depth, alpha, beta, true, 0);
 }
 
 }  // namespace chiron
