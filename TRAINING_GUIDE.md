@@ -23,6 +23,8 @@ Chiron ships with a lightweight NNUE evaluator. To bootstrap training:
      --depth 8 \
      --concurrency 2 \
      --enable-training \
+     --randomness-temperature 0.35 \
+     --randomness-top-moves 4 \
      --training-batch 256 \
      --training-rate 0.05 \
      --training-output nnue/models/chiron-selfplay-latest.nnue \
@@ -31,6 +33,7 @@ Chiron ships with a lightweight NNUE evaluator. To bootstrap training:
      --pgn logs/selfplay.pgn \
      --verboselite
    ```
+   The randomness flags activate softmax sampling over the top moves reported by the search so early games explore different continuations instead of repeating deterministic best lines. Tune the temperature upward for more variety, shrink it toward zero to approach pure minimax play, cap the exploration window with `--randomness-top-moves`, tighten quality with `--randomness-score-margin`, and limit noise to the opening with `--randomness-max-ply` when you want sharp midgames after diverse starts.
 2. The orchestrator automatically streams search telemetry (with `--verbose`), saves the continually updated network to `nnue/models/chiron-selfplay-latest.nnue`, and writes snapshot checkpoints to `nnue/models/history/` every optimisation step. This ensures each training run builds on the previous weights instead of starting from scratch. Swap `--verboselite` for `--verbose` if you only need to know when games finish without the detailed move trace.
 
 ## 3. Grow the Training Dataset
