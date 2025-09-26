@@ -34,6 +34,13 @@ class ParameterSet {
     nnue::Network network_{};
 };
 
+constexpr int kTrainerWeightLimit = 40000;
+
+enum class TrainerDevice {
+    kCPU,
+    kGPU,
+};
+
 /**
  * @brief Gradient-style optimiser for the simple NNUE evaluation.
  */
@@ -42,6 +49,7 @@ class Trainer {
     struct Config {
         double learning_rate = 0.05;
         double regularisation = 0.0005;
+        TrainerDevice device = TrainerDevice::kCPU;
     };
 
     Trainer();

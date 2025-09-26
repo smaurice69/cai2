@@ -56,6 +56,13 @@ class Network {
     [[nodiscard]] int32_t bias() const { return bias_; }
     [[nodiscard]] float scale() const { return scale_; }
 
+    std::vector<int32_t>& input_weights_data() { return input_weights_; }
+    const std::vector<int32_t>& input_weights_data() const { return input_weights_; }
+    std::vector<int32_t>& hidden_biases_data() { return hidden_biases_; }
+    const std::vector<int32_t>& hidden_biases_data() const { return hidden_biases_; }
+    std::vector<float>& output_weights_data() { return output_weights_; }
+    const std::vector<float>& output_weights_data() const { return output_weights_; }
+
    private:
     void ensure_storage(std::size_t hidden_size);
 
