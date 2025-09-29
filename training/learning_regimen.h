@@ -51,6 +51,7 @@ class LearningRegimen {
     void log_dataset_summary(const std::string& prefix, const DatasetEvaluationResult& summary) const;
     std::vector<TrainingExample> load_online_examples(std::size_t max_positions);
     void evaluate_holdout(int iteration);
+    void log_dataset_composition(const std::string& label, const std::vector<TrainingExample>& data) const;
 
     LearningRegimenConfig config_;
     Trainer trainer_;
