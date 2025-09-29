@@ -204,7 +204,9 @@ Key flags include:
 * `--iterations` (default from the positional argument) – Number of full cycles to execute.
 * `--teacher-engine PATH` / `--teacher-depth N` / `--teacher-threads N` – Configure the UCI teacher used during the supervised phase.
 * `--online-dir PATH` / `--online-batch SIZE` – Change where PGNs are read from and how many positions are replayed each iteration.
-* `--batch-size SIZE` / `--learning-rate RATE` / `--device cpu|gpu` – Control optimiser hyper-parameters shared across all phases.
+* `--concurrency N` (alias `--selfplay-concurrency`) – Number of parallel game workers during both self-play phases.
+* `--batch-size SIZE` / `--learning-rate RATE` / `--device cpu|gpu` – Control optimiser hyper-parameters shared across all phases. Combine with `--device gpu` on CUDA-enabled builds to offload NNUE updates.
+
 
 If no PGNs are found the online stage is skipped gracefully; the console reminds you where to place databases before training begins.
 

@@ -415,7 +415,7 @@ int run_learn_command(const std::vector<std::string>& args) {
             config.selfplay_games = std::max(0, parse_int(args, i, opt));
         } else if (opt == "--selfplay-depth") {
             config.selfplay_depth = std::max(1, parse_int(args, i, opt));
-        } else if (opt == "--selfplay-concurrency") {
+        } else if (opt == "--selfplay-concurrency" || opt == "--concurrency") {
             config.selfplay_concurrency = std::max(1, parse_int(args, i, opt));
         } else if (opt == "--selfplay-max-ply") {
             config.selfplay_max_ply = std::max(16, parse_int(args, i, opt));
