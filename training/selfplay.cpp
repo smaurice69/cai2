@@ -895,11 +895,11 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
     }
 
     total_positions_collected_ += added;
-    if (config_.verbose) {
+    {
         std::ostringstream collect;
         collect << "[Train] Collected " << added << " positions (buffer " << training_buffer_.size() << '/'
                 << config_.training_batch_size << ", total collected " << total_positions_collected_ << ')';
-        log_verbose(collect.str());
+        log_lite(collect.str());
     }
 
     train_buffer_if_ready_locked(false);
@@ -907,6 +907,11 @@ void SelfPlayOrchestrator::handle_training(const SelfPlayResult& result) {
 
 
 void SelfPlayOrchestrator::train_buffer_if_ready_locked(bool force) {
+    if (force && training_buffer_.empty()) {
+        log_lite("[Train] Forced training flush with empty buffer; no training performed.");
+        return;
+    }
+
     if (training_buffer_.empty()) {
         return;
     }
@@ -915,6 +920,16 @@ void SelfPlayOrchestrator::train_buffer_if_ready_locked(bool force) {
     }
 
     std::size_t batch = training_buffer_.size();
+    std::size_t projected_total = total_positions_trained_ + batch;
+
+    {
+        std::ostringstream flush;
+        flush << "[Train] Flushing training buffer with " << batch << " positions (force="
+              << (force ? "true" : "false") << ", total collected " << total_positions_collected_
+              << ", total trained " << projected_total << ')';
+        log_lite(flush.str());
+    }
+
     trainer_.train_batch(training_buffer_, parameters_);
     training_buffer_.clear();
     total_positions_trained_ += batch;
@@ -983,12 +998,13 @@ void SelfPlayOrchestrator::process_teacher_batch(std::vector<std::string> fen_ba
         training_buffer_.push_back({std::move(fen_batch[i]), scores[i]});
     }
 
-    if (config_.verbose) {
+    total_positions_collected_ += scores.size();
+    {
         std::ostringstream collect;
         collect << "[Train] Teacher labelled " << scores.size() << " positions (buffer "
                 << training_buffer_.size() << '/' << config_.training_batch_size
                 << ", total collected " << total_positions_collected_ << ')';
-        log_verbose(collect.str());
+        log_lite(collect.str());
     }
 
     train_buffer_if_ready_locked(force);
