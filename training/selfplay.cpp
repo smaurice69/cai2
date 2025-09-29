@@ -424,6 +424,10 @@ void SelfPlayOrchestrator::run() {
             log_verbose(randomness.str());
         }
 
+        if (config_.alternate_colors) {
+            log_verbose("[SelfPlay] Alternating colors within and across game pairs to vary opening perspectives.");
+        }
+
         if (config_.enable_training) {
             std::ostringstream train;
             train << "[Train] Batch size " << config_.training_batch_size << ", learning rate "
@@ -465,8 +469,14 @@ void SelfPlayOrchestrator::run() {
                     black = config_.black;
                     alternate_colors = config_.alternate_colors;
                 }
-                if (alternate_colors && (game % 2 == 1)) {
-                    std::swap(white, black);
+                if (alternate_colors) {
+                    int pair_index = game / 2;
+                    bool flip_pair_orientation = (pair_index % 2) == 1;
+                    bool second_game_in_pair = (game % 2) == 1;
+                    bool swap_colors = flip_pair_orientation ? !second_game_in_pair : second_game_in_pair;
+                    if (swap_colors) {
+                        std::swap(white, black);
+                    }
                 }
                 play_game(game, white, black, true);
             }
