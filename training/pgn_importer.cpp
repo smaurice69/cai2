@@ -62,6 +62,21 @@ bool is_result_token(const std::string& token) {
     return token == "1-0" || token == "0-1" || token == "1/2-1/2" || token == "*";
 }
 
+int orient_target_for_fen(const std::string& fen, int target) {
+    if (target == 0) {
+        return 0;
+    }
+    std::size_t space = fen.find(' ');
+    if (space == std::string::npos || space + 1 >= fen.size()) {
+        return target;
+    }
+    char side_to_move = fen[space + 1];
+    if (side_to_move == 'b' || side_to_move == 'B') {
+        return -target;
+    }
+    return target;
+}
+
 }  // namespace
 
 int PgnImporter::result_to_target(const std::string& result_tag) {
@@ -104,7 +119,7 @@ std::vector<TrainingExample> PgnImporter::import_file(const std::string& path, b
                 int target = result_to_target(current_result);
                 if (include_draws || target != 0) {
                     for (const std::string& fen : positions) {
-                        examples.push_back({fen, target});
+                        examples.push_back({fen, orient_target_for_fen(fen, target)});
                     }
                 }
                 positions.clear();
@@ -112,19 +127,19 @@ std::vector<TrainingExample> PgnImporter::import_file(const std::string& path, b
             board.set_start_position();
             current_result.clear();
 
-            std::string tag_name;
-            std::string tag_value;
-            std::size_t space_pos = token.find(' ');
-            if (space_pos != std::string::npos) {
-                tag_name = token.substr(1, space_pos - 1);
-                tag_value = token.substr(space_pos + 1);
-                while (!tag_value.empty() && tag_value.back() != ']') {
-                    std::string continuation;
-                    if (!(iss >> continuation)) {
-                        break;
-                    }
-                    tag_value += ' ' + continuation;
+            std::string header = token;
+            while (!header.empty() && header.back() != ']') {
+                std::string continuation;
+                if (!(iss >> continuation)) {
+                    break;
                 }
+                header += ' ' + continuation;
+            }
+
+            std::size_t space_pos = header.find(' ');
+            if (space_pos != std::string::npos) {
+                std::string tag_name = header.substr(1, space_pos - 1);
+                std::string tag_value = header.substr(space_pos + 1);
                 if (!tag_value.empty() && tag_value.back() == ']') {
                     tag_value.pop_back();
                 }
@@ -151,7 +166,7 @@ std::vector<TrainingExample> PgnImporter::import_file(const std::string& path, b
                 int target = result_to_target(!current_result.empty() ? current_result : token);
                 if (include_draws || target != 0) {
                     for (const std::string& fen : positions) {
-                        examples.push_back({fen, target});
+                        examples.push_back({fen, orient_target_for_fen(fen, target)});
                     }
                 }
                 positions.clear();
@@ -167,13 +182,11 @@ std::vector<TrainingExample> PgnImporter::import_file(const std::string& path, b
         }
 
         try {
-            TrainingExample example;
-            example.fen = board.fen();
-            positions.push_back(example.fen);
-
+            std::string fen = board.fen();
             Move move = san_to_move(board, san);
             Board::State state;
             board.make_move(move, state);
+            positions.push_back(std::move(fen));
         } catch (const std::exception&) {
             // Skip malformed moves.
         }
@@ -183,7 +196,7 @@ std::vector<TrainingExample> PgnImporter::import_file(const std::string& path, b
         int target = result_to_target(current_result);
         if (include_draws || target != 0) {
             for (const std::string& fen : positions) {
-                examples.push_back({fen, target});
+                examples.push_back({fen, orient_target_for_fen(fen, target)});
             }
         }
     }
