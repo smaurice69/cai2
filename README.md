@@ -118,6 +118,7 @@ The `chiron` executable also exposes a suite of helper commands:
 |---------|-------------|
 | `perft --depth N [--fen FEN]` | Executes a perft test from the current position. |
 | `selfplay [options]` | Runs concurrent self-play games (see below). |
+| `learn [iterations] [options]` | Launches the self-supervised regimen combining self-play, Stockfish supervision, and online PGNs. |
 | `train --input dataset.txt [--output net.nnue] [--rate 0.05] [--batch 256] [--iterations 3] [--shuffle]` | Trains the evaluator on a dataset of `fen|score` lines. |
 | `train-teacher --teacher /path/to/stockfish [--games 1M] [--depth 15] [--batch 2048] [--teacher-batch 512] [--device gpu]` | Runs Stockfish-supervised training that streams labelled positions directly into the NNUE trainer. |
 | `import-pgn --pgn games.pgn [--output dataset.txt] [--no-draws]` | Converts a PGN database into a training dataset. |
@@ -177,6 +178,36 @@ Key options:
 * `--verboselite` – Emit a single line summary as each game finishes without the full move-by-move trace.
 
 Training batches are accumulated from every game (start position plus subsequent FENs). When the buffer exceeds the requested batch size, the trainer performs an optimisation step, saves the updated network, and reloads it for subsequent games.
+
+### One-command learning regimen
+
+When you simply want to improve the bundled network and then play against it, run the integrated regimen:
+
+```bash
+./chiron -learn 1000 \
+  --teacher-engine /opt/engines/stockfish \
+  --selfplay-games 32 \
+  --teacher-games 16 \
+  --online-batch 4096
+```
+
+The `learn` command cycles through three complementary phases on each iteration:
+
+1. **Pure self-play** – Generates fresh experience with the current NNUE weights and immediately trains on the collected buffer.
+2. **Teacher-guided self-play** – Mirrors the same schedule but asks the configured Stockfish binary (or any UCI engine) to label positions for supervised updates.
+3. **Online replay** – Streams raw PGN games from `data/online_pgns/` directly into the trainer. Drop downloaded lichess/Chess.com databases into this folder—no pre-processing is required and files are discovered automatically.
+
+The regimen prints a concise log for each phase plus a pseudo-Elo/accuracy summary on a holdout slice sampled from your PGN databases, allowing you to track progress at a glance. Updated networks are written to `nnue/models/chiron-learned.nnue` after every online replay step so you can immediately load them via `setoption name EvalNetwork value nnue/models/chiron-learned.nnue` once training finishes.
+
+Key flags include:
+
+* `--iterations` (default from the positional argument) – Number of full cycles to execute.
+* `--teacher-engine PATH` / `--teacher-depth N` / `--teacher-threads N` – Configure the UCI teacher used during the supervised phase.
+* `--online-dir PATH` / `--online-batch SIZE` – Change where PGNs are read from and how many positions are replayed each iteration.
+* `--concurrency N` (alias `--selfplay-concurrency`) – Number of parallel game workers during both self-play phases.
+* `--batch-size SIZE` / `--learning-rate RATE` / `--device cpu|gpu` – Control optimiser hyper-parameters shared across all phases. Combine with `--device gpu` on CUDA-enabled builds to offload NNUE updates.
+
+If no PGNs are found the online stage is skipped gracefully; the console reminds you where to place databases before training begins.
 
 ### Verbose Telemetry
 

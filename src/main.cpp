@@ -20,8 +20,10 @@
 #include "tools/teacher.h"
 #include "tools/tuning.h"
 #include "training/pgn_importer.h"
+#include "training/learning_regimen.h"
 #include "training/selfplay.h"
 #include "training/trainer.h"
+#include "training/training_metrics.h"
 
 namespace {
 
@@ -32,6 +34,8 @@ using chiron::TeacherEngine;
 using chiron::Trainer;
 using chiron::TrainerDevice;
 using chiron::TrainingExample;
+using chiron::DatasetEvaluationResult;
+using chiron::evaluate_dataset_performance;
 using chiron::load_training_file;
 using chiron::perft;
 using chiron::save_training_file;
@@ -132,48 +136,6 @@ TrainerDevice parse_trainer_device_option(const std::string& value) {
         return TrainerDevice::kGPU;
     }
     throw std::invalid_argument("Unknown training device: " + value);
-}
-
-struct DatasetEvaluationResult {
-    double accuracy = 0.0;
-    double pseudo_elo = 0.0;
-    std::size_t samples = 0;
-};
-
-DatasetEvaluationResult evaluate_dataset_performance(const std::vector<TrainingExample>& data,
-                                                     const ParameterSet& parameters,
-                                                     const Trainer& trainer,
-                                                     std::size_t max_samples = 4096) {
-    DatasetEvaluationResult result;
-    if (data.empty() || max_samples == 0) {
-        return result;
-    }
-
-    std::size_t sample_count = std::min(max_samples, data.size());
-    double total_score = 0.0;
-    double step = static_cast<double>(data.size()) / static_cast<double>(sample_count);
-    for (std::size_t i = 0; i < sample_count; ++i) {
-        std::size_t index = static_cast<std::size_t>(i * step);
-        if (index >= data.size()) {
-            index = data.size() - 1;
-        }
-        const TrainingExample& example = data[index];
-        int predicted_cp = trainer.evaluate_example(example, parameters);
-        double predicted_prob = 1.0 / (1.0 + std::exp(-static_cast<double>(predicted_cp) / 400.0));
-        double actual_prob = 0.5;
-        if (example.target_cp > 50) {
-            actual_prob = 1.0;
-        } else if (example.target_cp < -50) {
-            actual_prob = 0.0;
-        }
-        total_score += 1.0 - std::fabs(predicted_prob - actual_prob);
-    }
-
-    result.samples = sample_count;
-    result.accuracy = total_score / static_cast<double>(sample_count);
-    double clipped = std::clamp(result.accuracy, 0.01, 0.99);
-    result.pseudo_elo = 400.0 * std::log10(clipped / (1.0 - clipped));
-    return result;
 }
 
 int run_perft(const std::vector<std::string>& args) {
@@ -429,6 +391,80 @@ int run_time_analysis(const std::vector<std::string>& args) {
 
     int sample = manager.allocate_time_ms(60000, 0, 20, static_cast<int>(report.recommended_moves_to_go));
     std::cout << "Sample allocation with 60s remaining: " << sample << " ms" << std::endl;
+    return 0;
+}
+
+int run_learn_command(const std::vector<std::string>& args) {
+    chiron::LearningRegimenConfig config;
+    std::size_t index = 1;
+
+    if (args.size() > 1 && !args[1].empty() && args[1].front() != '-') {
+        try {
+            config.iterations = std::stoi(args[1]);
+        } catch (const std::exception&) {
+            throw std::invalid_argument("Invalid iteration count: " + args[1]);
+        }
+        index = 2;
+    }
+
+    for (std::size_t i = index; i < args.size(); ++i) {
+        const std::string& opt = args[i];
+        if (opt == "--iterations") {
+            config.iterations = std::max(1, parse_int(args, i, opt));
+        } else if (opt == "--selfplay-games") {
+            config.selfplay_games = std::max(0, parse_int(args, i, opt));
+        } else if (opt == "--selfplay-depth") {
+            config.selfplay_depth = std::max(1, parse_int(args, i, opt));
+        } else if (opt == "--selfplay-concurrency" || opt == "--concurrency") {
+            config.selfplay_concurrency = std::max(1, parse_int(args, i, opt));
+        } else if (opt == "--selfplay-max-ply") {
+            config.selfplay_max_ply = std::max(16, parse_int(args, i, opt));
+        } else if (opt == "--teacher-games") {
+            config.teacher_games = std::max(0, parse_int(args, i, opt));
+        } else if (opt == "--teacher-engine") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.teacher_engine_path = args[++i];
+        } else if (opt == "--teacher-depth") {
+            config.teacher_depth = std::max(1, parse_int(args, i, opt));
+        } else if (opt == "--teacher-threads") {
+            config.teacher_threads = std::max(1, parse_int(args, i, opt));
+        } else if (opt == "--online-dir") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.online_database_dir = args[++i];
+        } else if (opt == "--online-batch") {
+            config.online_batch_positions = parse_size(args, i, opt);
+        } else if (opt == "--learning-rate") {
+            config.learning_rate = parse_double(args, i, opt);
+        } else if (opt == "--batch-size") {
+            config.training_batch_size = parse_size(args, i, opt);
+        } else if (opt == "--output") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.output_network_path = args[++i];
+        } else if (opt == "--history-dir") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.training_history_dir = args[++i];
+        } else if (opt == "--hidden-size") {
+            config.hidden_size = parse_size(args, i, opt);
+        } else if (opt == "--device") {
+            if (i + 1 >= args.size()) throw std::invalid_argument(opt + " requires a value");
+            config.training_device = parse_trainer_device_option(args[++i]);
+        } else if (opt == "--holdout") {
+            config.holdout_samples = parse_size(args, i, opt);
+        } else if (opt == "--include-draws") {
+            config.include_draws = true;
+        } else if (opt == "--no-draws") {
+            config.include_draws = false;
+        } else {
+            throw std::invalid_argument("Unknown learn option: " + opt);
+        }
+    }
+
+    if (config.iterations <= 0) {
+        throw std::invalid_argument("learn iterations must be positive");
+    }
+
+    chiron::LearningRegimen regimen(config);
+    regimen.run();
     return 0;
 }
 
@@ -747,6 +783,9 @@ int main(int argc, char** argv) {
         }
         if (command == "perft") {
             return run_perft(args);
+        }
+        if (command == "learn" || command == "-learn" || command == "--learn") {
+            return run_learn_command(args);
         }
         if (command == "train") {
             return run_train_command(args);
