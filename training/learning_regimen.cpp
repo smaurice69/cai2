@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
+#include <map>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -85,6 +88,13 @@ LearningRegimen::LearningRegimen(LearningRegimenConfig config)
         if (holdout_set_.size() > config_.holdout_samples) {
             holdout_set_.resize(config_.holdout_samples);
         }
+        if (!holdout_set_.empty()) {
+            log_dataset_composition("Holdout set", holdout_set_);
+        } else {
+            std::cout << "[Learn] Holdout set is empty after sampling from online PGNs." << std::endl;
+        }
+    } else if (config_.holdout_samples > 0) {
+        std::cout << "[Learn] Holdout set disabled: no online PGN files were discovered." << std::endl;
     }
 }
 
@@ -139,6 +149,113 @@ void LearningRegimen::log_dataset_summary(const std::string& prefix, const Datas
               << ", accuracy " << std::setprecision(1) << (summary.accuracy * 100.0)
               << "% over " << summary.samples << " samples" << std::defaultfloat << std::setprecision(6)
               << std::endl;
+}
+
+void LearningRegimen::log_dataset_composition(const std::string& label, const std::vector<TrainingExample>& data) const {
+    if (data.empty()) {
+        std::cout << "[Learn] " << label << " dataset is empty; no composition statistics available." << std::endl;
+        return;
+    }
+
+    std::size_t white_to_move = 0;
+    std::size_t invalid_side = 0;
+    int min_target = data.front().target_cp;
+    int max_target = data.front().target_cp;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    std::map<int, std::size_t> target_counts;
+
+    for (const TrainingExample& example : data) {
+        std::size_t space = example.fen.find(' ');
+        if (space != std::string::npos && space + 1 < example.fen.size()) {
+            char stm = example.fen[space + 1];
+            if (stm == 'w' || stm == 'W') {
+                ++white_to_move;
+            }
+        } else {
+            ++invalid_side;
+        }
+
+        int target = example.target_cp;
+        min_target = std::min(min_target, target);
+        max_target = std::max(max_target, target);
+        sum += static_cast<double>(target);
+        sum_sq += static_cast<double>(target) * static_cast<double>(target);
+        ++target_counts[target];
+    }
+
+    std::size_t total = data.size();
+    std::size_t black_to_move = total - white_to_move - invalid_side;
+
+    auto percentage = [total](std::size_t count) {
+        if (total == 0) {
+            return 0.0;
+        }
+        return (static_cast<double>(count) / static_cast<double>(total)) * 100.0;
+    };
+
+    double mean = sum / static_cast<double>(total);
+    double variance = (sum_sq / static_cast<double>(total)) - (mean * mean);
+    if (variance < 0.0) {
+        variance = 0.0;
+    }
+    double stddev = std::sqrt(variance);
+
+    std::cout << "[Learn] " << label << ": " << total << " sample(s). White to move " << std::fixed
+              << std::setprecision(1) << percentage(white_to_move) << "% (" << white_to_move << ")"
+              << ", Black " << percentage(black_to_move) << "% (" << black_to_move << ")";
+    if (invalid_side > 0) {
+        std::cout << ", Unknown " << percentage(invalid_side) << "% (" << invalid_side << ")";
+    }
+    std::cout << std::defaultfloat << std::endl;
+
+    std::cout << "[Learn] " << label << " targets: min " << min_target << ", max " << max_target << ", mean "
+              << std::fixed << std::setprecision(2) << mean << ", stdev " << stddev << std::defaultfloat
+              << std::endl;
+
+    std::vector<std::pair<int, std::size_t>> breakdown(target_counts.begin(), target_counts.end());
+    std::sort(breakdown.begin(), breakdown.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.second != rhs.second) {
+            return lhs.second > rhs.second;
+        }
+        return lhs.first < rhs.first;
+    });
+
+    if (!breakdown.empty()) {
+        std::cout << "[Learn] " << label << " target breakdown:";
+        std::size_t limit = std::min<std::size_t>(5, breakdown.size());
+        std::size_t reported = 0;
+        for (std::size_t i = 0; i < limit; ++i) {
+            if (i == 0) {
+                std::cout << ' ';
+            } else {
+                std::cout << ", ";
+            }
+            double pct = percentage(breakdown[i].second);
+            std::cout << breakdown[i].first << ':' << breakdown[i].second << " (" << std::fixed
+                      << std::setprecision(1) << pct << '%';
+            std::cout << ')';
+            reported += breakdown[i].second;
+        }
+        if (breakdown.size() > limit) {
+            std::size_t remaining = total - reported;
+            double pct = percentage(remaining);
+            std::cout << ", other: " << remaining << " (" << std::fixed << std::setprecision(1) << pct << '%'
+                      << ')';
+        }
+        std::cout << std::defaultfloat << std::endl;
+    }
+
+    std::vector<TrainingExample> samples;
+    samples.reserve(std::min<std::size_t>(5, data.size()));
+    std::mt19937 rng(static_cast<unsigned int>(std::random_device{}()));
+    std::sample(data.begin(), data.end(), std::back_inserter(samples),
+                std::min<std::size_t>(5, data.size()), rng);
+
+    std::cout << "[Learn] " << label << " sample positions:" << std::endl;
+    for (const TrainingExample& sample : samples) {
+        std::cout << "         target " << sample.target_cp << " | " << sample.fen << std::endl;
+    }
 }
 
 std::vector<TrainingExample> LearningRegimen::load_online_examples(std::size_t max_positions) {
@@ -250,6 +367,8 @@ void LearningRegimen::run_online_phase(int iteration, int total_iterations) {
 
     std::cout << "[Learn] Iteration " << iteration << '/' << total_iterations << " online replay: "
               << dataset.size() << " positions from PGNs" << std::endl;
+
+    log_dataset_composition("Online replay batch", dataset);
 
     refresh_parameters_from_disk();
 
