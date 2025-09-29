@@ -87,6 +87,7 @@ class SelfPlayOrchestrator {
     void log_lite(const std::string& message);
     void record_elo(int game_index, const SelfPlayResult& result);
     void log_rating_snapshot(const std::string& prefix);
+    void load_existing_elo_history();
     Move select_move(const SearchResult& search_result, int ply);
     void train_buffer_if_ready_locked(bool force);
     void process_teacher_batch(std::vector<std::string> fen_batch, bool force);
@@ -112,7 +113,7 @@ class SelfPlayOrchestrator {
     std::size_t total_positions_collected_ = 0;
     std::size_t total_positions_trained_ = 0;
     EloTracker elo_tracker_{};
-  
+
     int detect_existing_history_iteration() const;
 };
 
