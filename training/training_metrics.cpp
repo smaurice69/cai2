@@ -16,6 +16,7 @@ DatasetEvaluationResult evaluate_dataset_performance(const std::vector<TrainingE
 
     std::size_t sample_count = std::min<std::size_t>(max_samples, data.size());
     double total_score = 0.0;
+    double total_squared_error = 0.0;
     double step = static_cast<double>(data.size()) / static_cast<double>(sample_count);
     for (std::size_t i = 0; i < sample_count; ++i) {
         std::size_t index = static_cast<std::size_t>(i * step);
@@ -32,10 +33,13 @@ DatasetEvaluationResult evaluate_dataset_performance(const std::vector<TrainingE
             actual_prob = 0.0;
         }
         total_score += 1.0 - std::fabs(predicted_prob - actual_prob);
+        double cp_error = static_cast<double>(predicted_cp - example.target_cp);
+        total_squared_error += cp_error * cp_error;
     }
 
     result.samples = sample_count;
     result.accuracy = total_score / static_cast<double>(sample_count);
+    result.mean_squared_error = total_squared_error / static_cast<double>(sample_count);
     double clipped = std::clamp(result.accuracy, 0.01, 0.99);
     result.pseudo_elo = 400.0 * std::log10(clipped / (1.0 - clipped));
     return result;
