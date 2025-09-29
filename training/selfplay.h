@@ -51,10 +51,10 @@ struct SelfPlayConfig {
     bool teacher_mode = false;
     TeacherConfig teacher{};
     std::size_t teacher_chunk_size = 256;
-    double randomness_temperature = 0.0;  /**< Softmax temperature for randomized move selection. */
-    int randomness_max_ply = 0;           /**< Apply randomness up to this ply (0 = entire game). */
-    int randomness_top_moves = 3;         /**< Consider at most this many moves when randomizing. */
-    int randomness_score_margin = 50;     /**< Only randomize among moves within this score margin (cp). */
+    double randomness_temperature = 0.7;  /**< Softmax temperature for randomized move selection. */
+    int randomness_max_ply = 24;          /**< Apply randomness up to this ply (0 = entire game). */
+    int randomness_top_moves = 4;         /**< Consider at most this many moves when randomizing. */
+    int randomness_score_margin = 40;     /**< Only randomize among moves within this score margin (cp). */
 };
 
 struct SelfPlayResult {
