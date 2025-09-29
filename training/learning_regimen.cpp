@@ -147,7 +147,8 @@ void LearningRegimen::log_dataset_summary(const std::string& prefix, const Datas
     }
     std::cout << prefix << std::fixed << std::setprecision(1) << summary.pseudo_elo
               << ", accuracy " << std::setprecision(1) << (summary.accuracy * 100.0)
-              << "% over " << summary.samples << " samples" << std::defaultfloat << std::setprecision(6)
+              << "%, MSE " << std::setprecision(1) << summary.mean_squared_error
+              << " over " << summary.samples << " samples" << std::defaultfloat << std::setprecision(6)
               << std::endl;
 }
 

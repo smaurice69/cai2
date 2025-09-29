@@ -197,7 +197,7 @@ The `learn` command cycles through three complementary phases on each iteration:
 2. **Teacher-guided self-play** – Mirrors the same schedule but asks the configured Stockfish binary (or any UCI engine) to label positions for supervised updates.
 3. **Online replay** – Streams raw PGN games from `data/online_pgns/` directly into the trainer. Drop downloaded lichess/Chess.com databases into this folder—no pre-processing is required and files are discovered automatically.
 
-The regimen prints a concise log for each phase plus a pseudo-Elo/accuracy summary on a holdout slice sampled from your PGN databases, allowing you to track progress at a glance. Updated networks are written to `nnue/models/chiron-learned.nnue` after every online replay step so you can immediately load them via `setoption name EvalNetwork value nnue/models/chiron-learned.nnue` once training finishes.
+The regimen prints a concise log for each phase plus a pseudo-Elo/accuracy/MSE summary on a holdout slice sampled from your PGN databases, allowing you to track progress at a glance. Updated networks are written to `nnue/models/chiron-learned.nnue` after every online replay step so you can immediately load them via `setoption name EvalNetwork value nnue/models/chiron-learned.nnue` once training finishes.
 
 Key flags include:
 

@@ -529,7 +529,8 @@ int run_train_command(const std::vector<std::string>& args) {
         }
         std::ostringstream oss;
         oss << prefix << std::fixed << std::setprecision(1) << eval.pseudo_elo
-            << ", accuracy " << std::setprecision(1) << (eval.accuracy * 100.0) << "% over " << eval.samples
+            << ", accuracy " << std::setprecision(1) << (eval.accuracy * 100.0)
+            << "%, MSE " << std::setprecision(1) << eval.mean_squared_error << " over " << eval.samples
             << " samples";
         std::cout << oss.str() << std::endl;
     };

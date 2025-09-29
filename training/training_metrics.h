@@ -10,6 +10,7 @@ namespace chiron {
 struct DatasetEvaluationResult {
     double accuracy = 0.0;
     double pseudo_elo = 0.0;
+    double mean_squared_error = 0.0;
     std::size_t samples = 0;
 };
 
