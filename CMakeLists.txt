@@ -33,6 +33,8 @@ add_library(chiron_lib
     training/trainer.cpp
     training/gpu_backend.cpp
     training/pgn_importer.cpp
+    training/training_metrics.cpp
+    training/learning_regimen.cpp
     tools/tuning.cpp
     tools/teacher.cpp
 )
