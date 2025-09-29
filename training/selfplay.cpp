@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <fstream>
 #include <stdexcept>
 #include <ctime>
 #include <filesystem>
@@ -173,6 +174,18 @@ double result_to_white_score(const std::string& result) {
         return 0.5;
     }
     return -1.0;
+}
+
+std::string extract_pgn_tag_value(const std::string& line, const std::string& tag) {
+    std::string prefix = "[" + tag + " \"";
+    if (line.rfind(prefix, 0) != 0) {
+        return {};
+    }
+    std::size_t closing_quote = line.find('"', prefix.size());
+    if (closing_quote == std::string::npos) {
+        return {};
+    }
+    return line.substr(prefix.size(), closing_quote - prefix.size());
 }
 
 std::string format_player_update(const EloTracker::PlayerSummary& summary) {
@@ -390,9 +403,14 @@ void SelfPlayOrchestrator::ensure_streams() {
 }
 
 void SelfPlayOrchestrator::run() {
-    ensure_streams();
+    load_existing_elo_history();
     int total_games = config_.games;
     int concurrency = std::max(1, config_.concurrency);
+    if (total_games <= 0) {
+        log_lite("No games to play.");
+        return;
+    }
+    ensure_streams();
     if (config_.verbose) {
         std::ostringstream header;
         header << "[SelfPlay] Starting " << total_games << " game(s) with concurrency " << concurrency
@@ -1148,6 +1166,93 @@ int SelfPlayOrchestrator::detect_existing_history_iteration() const {
         }
     }
     return max_iter;
+}
+
+void SelfPlayOrchestrator::load_existing_elo_history() {
+    if (config_.pgn_path.empty()) {
+        return;
+    }
+
+    if (!config_.append_logs) {
+        return;
+    }
+
+    std::filesystem::path pgn_path(config_.pgn_path);
+    if (!std::filesystem::exists(pgn_path)) {
+        return;
+    }
+
+    std::ifstream input(pgn_path);
+    if (!input) {
+        std::ostringstream oss;
+        oss << "[Elo] Failed to open existing PGN history at " << pgn_path << ".";
+        log_lite(oss.str());
+        return;
+    }
+
+    std::string white;
+    std::string black;
+    std::string result;
+    std::size_t loaded_games = 0;
+
+    auto commit_game = [&]() {
+        if (white.empty() || black.empty()) {
+            white.clear();
+            black.clear();
+            result.clear();
+            return;
+        }
+        double score = result_to_white_score(result);
+        if (score < 0.0) {
+            white.clear();
+            black.clear();
+            result.clear();
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> elo_lock(elo_mutex_);
+            elo_tracker_.record_game(white, black, score);
+        }
+        ++loaded_games;
+        white.clear();
+        black.clear();
+        result.clear();
+    };
+
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            commit_game();
+            continue;
+        }
+        if (line.front() != '[') {
+            continue;
+        }
+
+        if (auto value = extract_pgn_tag_value(line, "White"); !value.empty()) {
+            white = std::move(value);
+            continue;
+        }
+        if (auto value = extract_pgn_tag_value(line, "Black"); !value.empty()) {
+            black = std::move(value);
+            continue;
+        }
+        if (auto value = extract_pgn_tag_value(line, "Result"); !value.empty()) {
+            result = std::move(value);
+            continue;
+        }
+    }
+    commit_game();
+
+    if (loaded_games > 0) {
+        std::ostringstream oss;
+        oss << "[Elo] Loaded " << loaded_games << " historical games from " << pgn_path << '.';
+        log_lite(oss.str());
+        log_rating_snapshot("[Elo] Ratings before new games: ");
+    }
 }
 
 }  // namespace chiron
